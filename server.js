@@ -5,7 +5,8 @@
 //   GET  /api/design              -> diseño del panel (marca, colores, textos)
 //   POST /api/device/challenge    -> reto de firma del dispositivo (ECDSA P-256)
 //   POST /api/device/claim        -> el dispositivo reclama su activación con la firma
-//   GET  /api/device/status       -> estado de la activación (pending/approved/active/revoked)
+//   POST /api/device/status       -> estado firmado: la app manda {registrationId, challengeId, signature}
+//   GET  /api/device/status       -> mismo estado por query (panel/compatibilidad)
 //   POST /api/registration/manual -> registro manual: nombre, correo, teléfono
 // Además sirve el panel web (misma API que el panel original):
 //   GET  /api/config, /api/session
@@ -138,6 +139,13 @@ function tokenFor(payload) {
   return `${head}.${body}.${b64url(sig)}`;
 }
 function nonce43() { return crypto.randomBytes(32).toString('base64url').slice(0, 43); }
+function verifyDeviceSig(pubB64, nonce, sigB64) {
+  try {
+    const pubBuf = Buffer.from(pubB64, 'base64');
+    const pubKey = crypto.createPublicKey({ key: pubBuf, format: 'der', type: 'spki' });
+    return crypto.verify(null, Buffer.from(nonce), pubKey, Buffer.from(sigB64, 'base64'));
+  } catch { return false; }
+}
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -199,6 +207,7 @@ const server = http.createServer(async (req, res) => {
         challengeId, nonce,
         publicKey: body.publicKey || body.public_key || null,
         phone: body.phone || null,
+        registrationId: body.registrationId || body.registration_id || null,
         createdAt: Date.now(), expiresAt: Date.now() + 10 * 60 * 1000,
       };
       saveStore(store);
@@ -209,6 +218,17 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/device/claim' && req.method === 'POST') {
       const body = await readBody(req);
       const challengeId = body.challengeId || body.challenge_id;
+      const pubB64claim = body.publicKey || body.public_key || null;
+      // Modo vincular dispositivo: la app manda {registrationId, statusToken, publicKey} sin reto.
+      if (!challengeId) {
+        const reg0 = (body.registrationId || body.registration_id) ? findReg(body.registrationId || body.registration_id) : null;
+        if (!reg0) return sendJson(res, 400, { ok: false, error: 'device_not_linked', message: 'Dispositivo sin registro.' });
+        if (pubB64claim) reg0.devicePublicKey = pubB64claim;
+        reg0.lastIp = clientIp(req); reg0.lastSeenAt = new Date().toISOString();
+        const statusToken0 = tokenFor({ sub: reg0.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
+        saveStore(store);
+        return sendJson(res, 200, { ok: true, status: deviceStatusFor(reg0), registrationId: reg0.id, registration_id: reg0.id, statusToken: statusToken0, signedStatus: statusToken0, authorizedAt: reg0.authorizedAt || null, leaseExpiresAt: reg0.leaseExpiresAt || null });
+      }
       const ch = store.challenges[challengeId];
       if (!ch || Date.now() > ch.expiresAt) {
         return sendJson(res, 400, { ok: false, error: 'invalid_challenge', message: 'El reto no es válido o caducó.' });
@@ -229,9 +249,10 @@ const server = http.createServer(async (req, res) => {
       if (signatureOk === false) {
         return sendJson(res, 400, { ok: false, error: 'invalid_signature', message: 'La firma del dispositivo no es válida.' });
       }
-      // Vincular con una solicitud por teléfono, si la hay.
+      // Vincular con una solicitud por registrationId o por teléfono, si la hay.
       const phone = body.phone || body.challengedPhone || ch.phone || null;
-      let reg = phone ? store.registrations.find(r => r.phone === phone && !r.archived) : null;
+      let reg = (body.registrationId || body.registration_id || ch.registrationId) ? findReg(body.registrationId || body.registration_id || ch.registrationId) : null;
+      if (!reg && phone) reg = store.registrations.find(r => r.phone === phone && !r.archived) || null;
       if (!reg) {
         reg = { id: uid(), name: body.name || null, email: body.email || null, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
         store.registrations.push(reg);
@@ -257,6 +278,36 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ---- Estado del dispositivo (app Android) ----
+    // La app hace POST con {registrationId, challengeId, signature} y espera
+    // {allowed, status, authorizedAt, leaseExpiresAt, launchExpiresAt} en ms.
+    // leaseExpiresAt debe vencer en menos de 6 min y launchExpiresAt en menos
+    // de 2 min: el acceso se renueva en cada arranque (por eso el diálogo
+    // dice "renovar el acceso"). La autorización de 30 días sigue aparte.
+    if (p === '/api/device/status' && req.method === 'POST') {
+      const body = await readBody(req);
+      const reg = (body.registrationId || body.registration_id) ? findReg(body.registrationId || body.registration_id) : null;
+      if (!reg) return sendJson(res, 200, { ok: true, allowed: false, status: 'not_enrolled', message: 'Dispositivo sin registro.' });
+      const ch = body.challengeId ? store.challenges[body.challengeId] : null;
+      if (body.challengeId && (!ch || Date.now() > ch.expiresAt)) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_challenge', message: 'El reto no es válido o caducó.' });
+      }
+      if (ch && body.signature && reg.devicePublicKey) {
+        if (!verifyDeviceSig(reg.devicePublicKey, ch.nonce, body.signature)) {
+          return sendJson(res, 400, { ok: false, error: 'invalid_signature', message: 'La firma del dispositivo no es válida.' });
+        }
+      }
+      if (ch) { delete store.challenges[body.challengeId]; }
+      reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
+      const st = deviceStatusFor(reg);
+      if (st === 'approved' || st === 'active') {
+        const now = Date.now();
+        const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(now / 1000) });
+        saveStore(store);
+        return sendJson(res, 200, { ok: true, allowed: true, status: 'approved', registrationId: reg.id, authorizedAt: now, leaseExpiresAt: now + 300000, launchExpiresAt: now + 120000, statusToken, signedStatus: statusToken });
+      }
+      saveStore(store);
+      return sendJson(res, 200, { ok: true, allowed: false, status: st, registrationId: reg.id });
+    }
     if (p === '/api/device/status' && req.method === 'GET') {
       const token = url.searchParams.get('statusToken') || url.searchParams.get('token') || req.headers['authorization'] || '';
       const regId = url.searchParams.get('registrationId') || url.searchParams.get('id') || null;
@@ -265,10 +316,14 @@ const server = http.createServer(async (req, res) => {
         const dev = store.devices.find(d => d.statusToken === token);
         if (dev) reg = findReg(dev.registrationId);
       }
-      if (!reg) return sendJson(res, 200, { ok: true, status: 'not_enrolled', message: 'Dispositivo sin registro.' });
+      if (!reg) return sendJson(res, 200, { ok: true, allowed: false, status: 'not_enrolled', message: 'Dispositivo sin registro.' });
+      const now = Date.now();
+      const st = deviceStatusFor(reg);
+      const approved = st === 'approved' || st === 'active';
       return sendJson(res, 200, {
-        ok: true, status: deviceStatusFor(reg), registrationId: reg.id,
-        authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null,
+        ok: true, allowed: approved, status: st, registrationId: reg.id,
+        authorizedAt: reg.authorizedAt ? Date.parse(reg.authorizedAt) : now,
+        leaseExpiresAt: now + 300000, launchExpiresAt: now + 120000,
       });
     }
 
@@ -285,7 +340,7 @@ const server = http.createServer(async (req, res) => {
       if (existing) {
         return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, message: 'Este teléfono ya tiene otra solicitud guardada.' });
       }
-      const reg = { id: uid(), name, email, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
+      const reg = { id: uid(), name, email, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
       store.registrations.push(reg); saveStore(store);
       return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'pending', message: 'La solicitud queda guardada hasta que el administrador la revise.' });
     }
@@ -345,7 +400,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const reg = findReg(decodeURIComponent(m[1]));
       if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found' });
-      const action = body.action;
+      const action = body.action || body.status;
       if (action === 'approve' || action === 'approved') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(); }
       else if (action === 'reject' || action === 'rejected') { reg.status = 'rejected'; }
       else if (action === 'revoke' || action === 'revoked') { reg.status = 'revoked'; }
