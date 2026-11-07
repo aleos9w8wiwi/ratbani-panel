@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ratbani · Panel de acceso</title>
+<style>
+body{margin:0;font-family:system-ui,Arial,sans-serif;background:#101611;color:#F5FAF2}
+main{max-width:720px;margin:0 auto;padding:24px 16px}
+h1{color:#C4F5AD}h2{margin-top:32px}
+.card{background:#1a231c;border:1px solid #2c3a2e;border-radius:12px;padding:16px;margin:12px 0}
+input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #444;background:#101611;color:#F5FAF2;width:100%;box-sizing:border-box;margin:6px 0}
+button{background:#C4F5AD;color:#101611;font-weight:700;border:0;cursor:pointer}
+button.ghost{background:transparent;color:#C4F5AD;border:1px solid #C4F5AD;width:auto;padding:6px 12px;margin:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.badge{padding:2px 8px;border-radius:20px;background:#333;font-size:13px}
+.badge.pending{background:#7a5b00}.badge.approved,.badge.active{background:#1e6b34}.badge.rejected,.badge.revoked{background:#7a1f1f}
+small{color:#aaa}
+</style></head><body><main>
+<h1>Ratbani · Panel de acceso</h1>
+<p>Servidor propio del panel de Ratbani. Registro, aprobación y estado de acceso.</p>
+
+<div class="card"><h2>Solicita tu acceso</h2>
+<form id="reg-form"><input name="name" placeholder="Nombre completo" required>
+<input name="email" type="email" placeholder="Correo electrónico" required>
+<input name="phone" placeholder="Teléfono con código de país (+52…)" required>
+<button>Enviar solicitud</button></form>
+<p id="reg-msg"></p></div>
+
+<div class="card"><h2>Consulta tu estado</h2>
+<input id="status-id" placeholder="ID de tu solicitud">
+<button id="status-btn">Actualizar estado</button>
+<p id="status-msg"></p></div>
+
+<div class="card"><h2>Administrador</h2>
+<input id="admin-key" type="password" placeholder="Clave de administrador (ADMIN_KEY)">
+<button id="admin-btn">Ver solicitudes</button>
+<p><small>La clave por defecto es <b>ratbani-admin</b>. Cámbiala en Render con la variable ADMIN_KEY.</small></p>
+<div id="admin-list"></div>
+<div id="otp-list"></div>
+<h3>Registro de accesos (IP)</h3>
+<div id="log-list"></div></div>
+</main>
+<script>
+async function api(path, opts={}){
+  const r = await fetch(path, {headers:{'Content-Type':'application/json','x-acceso-admin':document.getElementById('admin-key').value||''}, ...opts});
+  const d = await r.json(); if(!r.ok) throw new Error(d.message||('Error '+r.status)); return d;
+}
+document.getElementById('reg-form').addEventListener('submit', async e=>{
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try{
+    const d = await api('/api/registration/manual',{method:'POST',body:JSON.stringify({name:f.get('name'),email:f.get('email'),phone:f.get('phone')})});
+    document.getElementById('reg-msg').textContent = 'Solicitud guardada. ID: '+d.registrationId+' · Estado: '+d.status;
+    document.getElementById('status-id').value = d.registrationId;
+  }catch(err){ document.getElementById('reg-msg').textContent = err.message; }
+});
+document.getElementById('status-btn').addEventListener('click', async ()=>{
+  const id = document.getElementById('status-id').value.trim(); if(!id) return;
+  try{ const d = await api('/api/registration/status?id='+encodeURIComponent(id));
+    document.getElementById('status-msg').textContent = 'Estado: '+d.status;
+  }catch(err){ document.getElementById('status-msg').textContent = err.message; }
+});
+document.getElementById('admin-btn').addEventListener('click', async ()=>{
+  try{
+    const d = await api('/api/admin/registrations');
+    const list = document.getElementById('admin-list');
+    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
+      <button class="ghost" data-id="${r.id}" data-act="approve">Aprobar</button>
+      <button class="ghost" data-id="${r.id}" data-act="reject">Rechazar</button>
+      <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
+    document.getElementById('otp-list').innerHTML = d.otps && d.otps.length ? '<h3>Códigos web pendientes</h3>' + d.otps.map(o=>`<p>${o.name} · ${o.phone} · código: <b>${o.code}</b></p>`).join('') : '';
+    try{
+      const log = await api('/api/admin/access-log');
+      document.getElementById('log-list').innerHTML = log.accessLog.map(e=>`<p><small>${e.at||''} · ${e.ip||'-'} · ${e.method} ${e.path} · ${e.userAgent||''}</small></p>`).join('') || '<p>Sin accesos registrados.</p>';
+    }catch(e){ document.getElementById('log-list').textContent = ''; }
+    list.querySelectorAll('button[data-id]').forEach(b=>b.addEventListener('click', async ()=>{
+      await api('/api/admin/registrations/'+encodeURIComponent(b.dataset.id),{method:'PATCH',body:JSON.stringify({action:b.dataset.act})});
+      document.getElementById('admin-btn').click();
+    }));
+  }catch(err){ document.getElementById('admin-list').textContent = err.message; }
+});
+</script></body></html>

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: ratbani-panel
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_KEY
+        value: ratbani-admin
+      - key: FIXED_PHONE
+        value: ""
+      - key: FIXED_NAME
+        value: Usuario fijo

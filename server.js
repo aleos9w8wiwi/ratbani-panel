@@ -1,0 +1,368 @@
+// Servidor del panel de acceso de Ratbani
+// ================================
+// Para la APK Ratbani (AccessActivity / RegistrationActivity).
+// La APK habla con su origen HTTPS (acceso.API_ORIGIN) con estos endpoints:
+//   GET  /api/design              -> diseño del panel (marca, colores, textos)
+//   POST /api/device/challenge    -> reto de firma del dispositivo (ECDSA P-256)
+//   POST /api/device/claim        -> el dispositivo reclama su activación con la firma
+//   GET  /api/device/status       -> estado de la activación (pending/approved/active/revoked)
+//   POST /api/registration/manual -> registro manual: nombre, correo, teléfono
+// Además sirve el panel web (misma API que el panel original):
+//   GET  /api/config, /api/session
+//   GET  /api/admin/registrations, PATCH /api/admin/registrations/:id
+//   POST /api/registration/start, /api/registration/verify
+//   GET  /api/registration/status
+//
+// Sin dependencias: solo Node 18+ (http, crypto, fs).
+// Datos: se guardan en ./data/store.json (en Render gratis el disco es
+// efímero: si el servicio se reinicia, las solicitudes se pierden.
+// Para uso real, pon una base de datos. Para un panel personal, vale.)
+//
+// Admin: pon la variable de entorno ADMIN_KEY en Render.
+// Por defecto es "ratbani-admin": CÁMBIALA antes de usarlo en serio.
+// El panel web pide esa clave y la manda como header x-acceso-admin.
+//
+// Puerto: process.env.PORT o 3000
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PORT = process.env.PORT || 3000;
+const ADMIN_KEY = process.env.ADMIN_KEY || 'ratbani-admin';
+// Usuario fijo: pon FIXED_PHONE en Render (ej. +528100000000).
+// Ese teléfono queda pre-aprobado siempre, sin esperar al admin.
+// Opcional: FIXED_NAME y FIXED_EMAIL para su ficha.
+const FIXED_PHONE = (process.env.FIXED_PHONE || '').trim();
+const FIXED_NAME = process.env.FIXED_NAME || 'Usuario fijo';
+const FIXED_EMAIL = process.env.FIXED_EMAIL || '';
+const STORE_PATH = path.join(__dirname, 'data', 'store.json');
+const KEY_PATH = path.join(__dirname, 'data', 'server-key.json');
+
+const DESIGN = {
+  schema: 1,
+  brand: 'Ratbani',
+  background: '#101611',
+  text: '#F5FAF2',
+  accent: '#C4F5AD',
+  logo: null,
+  registration: {
+    title: 'Solicita tu acceso',
+    description: 'Completa tus datos. El administrador revisará tu solicitud.',
+  },
+  home: {
+    enabled: true,
+    title: 'Bienvenido a Ratbani',
+    subtitle: 'Tu espacio personal',
+    button: 'Entrar',
+    blocks: [
+      { type: 'icon', icon: 'shield', text: 'Un acceso, tu dispositivo' },
+      { type: 'text', text: 'Consulta las novedades de tu aplicación' },
+    ],
+  },
+};
+
+function loadStore() {
+  try {
+    const s = JSON.parse(fs.readFileSync(STORE_PATH, 'utf8'));
+    s.registrations = s.registrations || []; s.devices = s.devices || [];
+    s.challenges = s.challenges || {}; s.otps = s.otps || {}; s.accessLog = s.accessLog || [];
+    return s;
+  } catch {
+    return { registrations: [], devices: [], challenges: {}, otps: {}, accessLog: [] };
+  }
+}
+function saveStore(s) {
+  fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
+  fs.writeFileSync(STORE_PATH, JSON.stringify(s, null, 2));
+}
+let store = loadStore();
+
+// Registro de accesos: IP, fecha, ruta, usuario/dispositivo, navegador/app.
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return req.socket ? req.socket.remoteAddress : '';
+}
+function logAccess(req, info = {}) {
+  store.accessLog.push({
+    at: new Date().toISOString(),
+    ip: clientIp(req),
+    method: req.method,
+    path: new URL(req.url, 'http://x').pathname,
+    userAgent: req.headers['user-agent'] || '',
+    ...info,
+  });
+  if (store.accessLog.length > 500) store.accessLog = store.accessLog.slice(-500);
+  saveStore(store);
+}
+function isFixedPhone(phone) { return FIXED_PHONE && phone && phone === FIXED_PHONE; }
+// Usuario fijo pre-aprobado (si FIXED_PHONE está puesto).
+if (FIXED_PHONE) {
+  let fixed = store.registrations.find(r => r.phone === FIXED_PHONE);
+  if (!fixed) {
+    fixed = { id: uid(), name: FIXED_NAME, email: FIXED_EMAIL, phone: FIXED_PHONE, status: 'approved', fixed: true, source: 'fixed', createdAt: new Date().toISOString(), authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString() };
+    store.registrations.push(fixed); saveStore(store);
+  } else if (fixed.status !== 'approved') {
+    fixed.status = 'approved'; fixed.fixed = true; fixed.authorizedAt = fixed.authorizedAt || new Date().toISOString(); saveStore(store);
+  }
+}
+
+// Clave del servidor para firmar tokens de activación (ECDSA P-256).
+// Se genera una vez y se guarda en data/server-key.json.
+function loadServerKey() {
+  try {
+    const j = JSON.parse(fs.readFileSync(KEY_PATH, 'utf8'));
+    return crypto.createPrivateKey(j.privateKey);
+  } catch {
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const priv = privateKey.export({ type: 'pkcs8', format: 'pem' });
+    const pub = publicKey.export({ type: 'spki', format: 'pem' });
+    fs.mkdirSync(path.dirname(KEY_PATH), { recursive: true });
+    fs.writeFileSync(KEY_PATH, JSON.stringify({ privateKey: priv, publicKey: pub }, null, 2));
+    return crypto.createPrivateKey(priv);
+  }
+}
+const serverKey = loadServerKey();
+const serverPubPem = (() => {
+  try { return JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')).publicKey; } catch { return null; }
+})();
+
+function uid() { return crypto.randomUUID(); }
+function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+function tokenFor(payload) {
+  const head = b64url(JSON.stringify({ alg: 'ES256', typ: 'JWT' }));
+  const body = b64url(JSON.stringify(payload));
+  const sig = crypto.sign(null, Buffer.from(`${head}.${body}`), serverKey);
+  return `${head}.${body}.${b64url(sig)}`;
+}
+function nonce43() { return crypto.randomBytes(32).toString('base64url').slice(0, 43); }
+
+function sendJson(res, status, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
+  res.end(body);
+}
+function sendFile(res, file, type) {
+  try {
+    const data = fs.readFileSync(file);
+    res.writeHead(200, { 'content-type': type, 'content-length': data.length });
+    res.end(data);
+  } catch { sendJson(res, 404, { ok: false, error: 'not_found' }); }
+}
+async function readBody(req) {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const raw = Buffer.concat(chunks).toString('utf8');
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch { return { _raw: raw }; }
+}
+function isAdmin(req) {
+  const h = req.headers['x-acceso-admin'];
+  if (h && h === ADMIN_KEY) return true;
+  try {
+    const u = new URL(req.url, 'http://x');
+    return u.searchParams.get('adminKey') === ADMIN_KEY;
+  } catch { return false; }
+}
+function findReg(id) { return store.registrations.find(r => r.id === id); }
+function deviceStatusFor(reg) {
+  if (!reg) return 'not_enrolled';
+  return reg.status;
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const p = url.pathname;
+    // Registro de IP en cada llamada a la API (no en la web ni /health).
+    if (p.startsWith('/api/')) logAccess(req, {});
+
+    if (p === '/' || p === '/health') {
+      if (p === '/health') return sendJson(res, 200, { ok: true, service: 'ratbani-panel', version: '1.0.0', registrations: store.registrations.length });
+      return sendFile(res, path.join(__dirname, 'public', 'index.html'), 'text/html; charset=utf-8');
+    }
+    if (p === '/panel' || p === '/registro') return sendFile(res, path.join(__dirname, 'public', 'index.html'), 'text/html; charset=utf-8');
+
+    // ---- Diseño (app Android) ----
+    if (p === '/api/design' && req.method === 'GET') {
+      return sendJson(res, 200, DESIGN);
+    }
+
+    // ---- Reto del dispositivo (app Android) ----
+    if (p === '/api/device/challenge' && req.method === 'POST') {
+      const body = await readBody(req);
+      const challengeId = uid();
+      const nonce = nonce43();
+      store.challenges[challengeId] = {
+        challengeId, nonce,
+        publicKey: body.publicKey || body.public_key || null,
+        phone: body.phone || null,
+        createdAt: Date.now(), expiresAt: Date.now() + 10 * 60 * 1000,
+      };
+      saveStore(store);
+      return sendJson(res, 200, { challengeId, nonce, challenge: nonce, expiresAt: store.challenges[challengeId].expiresAt });
+    }
+
+    // ---- Reclamo / activación (app Android) ----
+    if (p === '/api/device/claim' && req.method === 'POST') {
+      const body = await readBody(req);
+      const challengeId = body.challengeId || body.challenge_id;
+      const ch = store.challenges[challengeId];
+      if (!ch || Date.now() > ch.expiresAt) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_challenge', message: 'El reto no es válido o caducó.' });
+      }
+      // Verificar firma ECDSA del dispositivo sobre el nonce, si viene.
+      let signatureOk = null;
+      const sigB64 = body.signature || body.signedChallenge || null;
+      const pubB64 = body.publicKey || body.public_key || ch.publicKey || null;
+      if (sigB64 && pubB64) {
+        try {
+          let pubKey;
+          const pubBuf = Buffer.from(pubB64, 'base64');
+          try { pubKey = crypto.createPublicKey({ key: pubBuf, format: 'der', type: 'spki' }); }
+          catch { pubKey = crypto.createPublicKey({ key: pubBuf, format: 'der', type: 'spki' }); }
+          signatureOk = crypto.verify(null, Buffer.from(ch.nonce), pubKey, Buffer.from(sigB64, 'base64'));
+        } catch { signatureOk = false; }
+      }
+      if (signatureOk === false) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_signature', message: 'La firma del dispositivo no es válida.' });
+      }
+      // Vincular con una solicitud por teléfono, si la hay.
+      const phone = body.phone || body.challengedPhone || ch.phone || null;
+      let reg = phone ? store.registrations.find(r => r.phone === phone && !r.archived) : null;
+      if (!reg) {
+        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
+        store.registrations.push(reg);
+      } else if (pubB64) { reg.devicePublicKey = pubB64; }
+      reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
+      if (isFixedPhone(reg.phone) && reg.status !== 'approved') { reg.status = 'approved'; reg.fixed = true; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + 365*24*3600*1000).toISOString(); }
+      const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
+      const dev = { id: uid(), registrationId: reg.id, challengeId, publicKey: pubB64, signatureOk, statusToken, createdAt: new Date().toISOString() };
+      store.devices.push(dev);
+      delete store.challenges[challengeId];
+      saveStore(store);
+      const approved = reg.status === 'approved' || reg.status === 'active';
+      return sendJson(res, 200, {
+        ok: true,
+        status: approved ? 'active' : 'pending',
+        registrationId: reg.id,
+        registration_id: reg.id,
+        statusToken,
+        signedStatus: statusToken,
+        authorizedAt: reg.authorizedAt || null,
+        leaseExpiresAt: reg.leaseExpiresAt || null,
+      });
+    }
+
+    // ---- Estado del dispositivo (app Android) ----
+    if (p === '/api/device/status' && req.method === 'GET') {
+      const token = url.searchParams.get('statusToken') || url.searchParams.get('token') || req.headers['authorization'] || '';
+      const regId = url.searchParams.get('registrationId') || url.searchParams.get('id') || null;
+      let reg = regId ? findReg(regId) : null;
+      if (!reg && token) {
+        const dev = store.devices.find(d => d.statusToken === token);
+        if (dev) reg = findReg(dev.registrationId);
+      }
+      if (!reg) return sendJson(res, 200, { ok: true, status: 'not_enrolled', message: 'Dispositivo sin registro.' });
+      return sendJson(res, 200, {
+        ok: true, status: deviceStatusFor(reg), registrationId: reg.id,
+        authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null,
+      });
+    }
+
+    // ---- Registro manual (app Android) ----
+    if (p === '/api/registration/manual' && req.method === 'POST') {
+      const body = await readBody(req);
+      const name = (body.name || '').trim();
+      const email = (body.email || '').trim();
+      const phone = (body.phone || '').trim();
+      if (!name || !email || !phone) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_fields', message: 'Completa nombre, correo y teléfono. Todos son obligatorios.' });
+      }
+      const existing = store.registrations.find(r => r.phone === phone && !r.archived);
+      if (existing) {
+        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, message: 'Este teléfono ya tiene otra solicitud guardada.' });
+      }
+      const reg = { id: uid(), name, email, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
+      store.registrations.push(reg); saveStore(store);
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'pending', message: 'La solicitud queda guardada hasta que el administrador la revise.' });
+    }
+
+    // ---- Config / sesión (panel web) ----
+    if (p === '/api/config' && req.method === 'GET') {
+      return sendJson(res, 200, { databaseConfigured: true, registrationEnabled: true, serviceVersion: '1.0.0' });
+    }
+    if (p === '/api/session' && req.method === 'GET') {
+      return sendJson(res, 200, { authenticated: isAdmin(req), isAdmin: isAdmin(req), setupRequired: false, email: isAdmin(req) ? 'admin@ratbani' : null });
+    }
+
+    // ---- Registro web con código (sin SMS: el código se ve en el panel de admin) ----
+    if (p === '/api/registration/start' && req.method === 'POST') {
+      const body = await readBody(req);
+      const details = body.details || body;
+      const name = (details.name || '').trim(); const email = (details.email || '').trim(); const phone = (details.phone || '').trim();
+      if (!name || !email || !phone) return sendJson(res, 400, { ok: false, error: 'invalid_fields', message: 'Completa nombre, correo y teléfono.' });
+      const challengeId = uid();
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      store.otps[challengeId] = { challengeId, code, details: { name, email, phone }, createdAt: Date.now(), expiresAt: Date.now() + 10 * 60 * 1000 };
+      saveStore(store);
+      // Sin SMS en el plan gratis: el código aparece en el panel de admin.
+      // En esta versión también se devuelve para poder probarlo.
+      return sendJson(res, 200, { challengeId, devCode: code, message: 'Código generado. Pídelo al administrador o míralo en el panel.' });
+    }
+    if (p === '/api/registration/verify' && req.method === 'POST') {
+      const body = await readBody(req);
+      const otp = store.otps[body.challengeId];
+      if (!otp || Date.now() > otp.expiresAt || String(body.code).trim() !== otp.code) {
+        return sendJson(res, 400, { ok: false, error: 'invalid_code', message: 'El código no es válido.' });
+      }
+      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, status: isFixedPhone(otp.details.phone) ? 'approved' : 'pending', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString() };
+      store.registrations.push(reg);
+      delete store.otps[body.challengeId];
+      saveStore(store);
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'pending' });
+    }
+    if (p === '/api/registration/status' && req.method === 'GET') {
+      const reg = findReg(url.searchParams.get('id'));
+      if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found', message: 'Solicitud no encontrada.' });
+      return sendJson(res, 200, { ok: true, status: reg.status, registrationId: reg.id, authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null });
+    }
+
+    // ---- Admin ----
+    if (p === '/api/admin/access-log' && req.method === 'GET') {
+      if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: 'unauthorized', message: 'Falta la clave de administrador.' });
+      return sendJson(res, 200, { accessLog: store.accessLog.slice(-200).reverse() });
+    }
+    if (p === '/api/admin/registrations' && req.method === 'GET') {
+      if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: 'unauthorized', message: 'Falta la clave de administrador.' });
+      return sendJson(res, 200, { registrations: store.registrations, otps: Object.values(store.otps).map(o => ({ challengeId: o.challengeId, code: o.code, phone: o.details.phone, name: o.details.name })) });
+    }
+    const m = p.match(/^\/api\/admin\/registrations\/([^/]+)$/);
+    if (m && req.method === 'PATCH') {
+      if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: 'unauthorized' });
+      const body = await readBody(req);
+      const reg = findReg(decodeURIComponent(m[1]));
+      if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found' });
+      const action = body.action;
+      if (action === 'approve' || action === 'approved') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(); }
+      else if (action === 'reject' || action === 'rejected') { reg.status = 'rejected'; }
+      else if (action === 'revoke' || action === 'revoked') { reg.status = 'revoked'; }
+      else if (action === 'archive') { reg.archived = true; }
+      else if (action === 'pending') { reg.status = 'pending'; }
+      saveStore(store);
+      return sendJson(res, 200, { ok: true, registration: reg });
+    }
+
+    return sendJson(res, 404, { ok: false, error: 'not_found', message: 'Ruta no disponible.' });
+  } catch (err) {
+    console.error(err);
+    sendJson(res, 500, { ok: false, error: 'server_error', message: String(err.message || err) });
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`ratbani-panel escuchando en puerto ${PORT}`);
+  console.log('Panel: /  |  Salud: /health  |  Diseño: /api/design');
+});
