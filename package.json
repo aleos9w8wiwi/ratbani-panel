@@ -1,1 +1,12 @@
-{"description":"Servidor del panel de acceso de Ratbani (registro, aprobación y activación de dispositivos)","engines":{"node":">=18"},"main":"server.js","name":"ratbani-panel","scripts":{"start":"node server.js"},"version":"1.0.0"}
+{
+  "description": "Servidor del panel de acceso de Ratbani (registro, aprobaci\u00f3n y activaci\u00f3n de dispositivos)",
+  "engines": {
+    "node": "24.x"
+  },
+  "main": "server.js",
+  "name": "ratbani-panel",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "version": "1.0.0"
+}
