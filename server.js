@@ -193,6 +193,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/panel' || p === '/registro') return sendFile(res, path.join(__dirname, 'public', 'index.html'), 'text/html; charset=utf-8');
 
+    // Perfil temporal: no crea una solicitud ni concede acceso al dispositivo.
+    if (p === '/api/guest' && req.method === 'POST') {
+      const id = uid();
+      res.setHeader('cache-control', 'no-store');
+      return sendJson(res, 201, { id, name: `Invitado ${id.slice(0, 8)}`, type: 'guest' });
+    }
+
     // ---- Diseño (app Android) ----
     if (p === '/api/design' && req.method === 'GET') {
       return sendJson(res, 200, DESIGN);

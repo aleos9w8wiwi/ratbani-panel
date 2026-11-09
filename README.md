@@ -5,6 +5,7 @@ Sirve a la APK Ratbani (pantalla de acceso) y al panel web del administrador.
 
 ## Qué hace
 
+- `POST /api/guest` — genera un perfil temporal distinto en cada petición. Devuelve `id`, `name` y `type`; no crea una cuenta, concede acceso ni modifica las aprobaciones.
 - `GET /api/design` — diseño del panel que usa la app (marca, colores, textos).
 - `POST /api/device/challenge` — reto de firma ECDSA P-256 del dispositivo.
 - `POST /api/device/claim` — el dispositivo reclama su activación con la firma.
@@ -40,3 +41,7 @@ Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
 - La APK Ratbani apunta hoy a otro origen (`ratbani-panel-nuevo-...`).
   Para que use este servidor hay que cambiar `acceso.API_ORIGIN` en su
   manifiesto, un paso aparte.
+- Para generar un perfil cada vez que se abra la app, el cliente debe llamar
+  `POST /api/guest` en su inicio y mantener la respuesta solo durante esa
+  apertura. El APK existente no hace esta llamada automáticamente; requiere
+  cambiar su código y probarlo. El perfil no sustituye la autorización web.
