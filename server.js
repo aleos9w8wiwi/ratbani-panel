@@ -50,7 +50,7 @@ const DESIGN = {
   logo: null,
   registration: {
     title: 'Solicita tu acceso',
-    description: 'Completa tus datos. El administrador revisará tu solicitud.',
+    description: 'Completa tus datos. Tu acceso se activa automáticamente.',
   },
   home: {
     enabled: true,
@@ -261,11 +261,13 @@ const server = http.createServer(async (req, res) => {
       let reg = (body.registrationId || body.registration_id || ch.registrationId) ? findReg(body.registrationId || body.registration_id || ch.registrationId) : null;
       if (!reg && phone) reg = store.registrations.find(r => r.phone === phone && !r.archived) || null;
       if (!reg) {
-        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
+        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + (isFixedPhone(phone) ? 365 : 30) * 24 * 3600 * 1000).toISOString() };
         store.registrations.push(reg);
       } else if (pubB64) { reg.devicePublicKey = pubB64; }
       reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
-      if (isFixedPhone(reg.phone) && reg.status !== 'approved') { reg.status = 'approved'; reg.fixed = true; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + 365*24*3600*1000).toISOString(); }
+      // Aprobación automática: una solicitud nueva o pendiente se aprueba sola.
+      // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
+      if (reg.status === 'pending') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + (isFixedPhone(reg.phone) ? 365 : 30) * 24 * 3600 * 1000).toISOString(); if (isFixedPhone(reg.phone)) reg.fixed = true; }
       const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
       const dev = { id: uid(), registrationId: reg.id, challengeId, publicKey: pubB64, signatureOk, statusToken, createdAt: new Date().toISOString() };
       store.devices.push(dev);
@@ -345,11 +347,14 @@ const server = http.createServer(async (req, res) => {
       }
       const existing = store.registrations.find(r => r.phone === phone && !r.archived);
       if (existing) {
-        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, message: 'Este teléfono ya tiene otra solicitud guardada.' });
+        // Aprobación automática: si aún estaba pendiente, se aprueba sola.
+        // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
+        if (existing.status === 'pending') { existing.status = 'approved'; existing.authorizedAt = new Date().toISOString(); existing.leaseExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(); saveStore(store); }
+        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
       }
-      const reg = { id: uid(), name, email, phone, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : undefined, leaseExpiresAt: isFixedPhone(phone) ? new Date(Date.now() + 365*24*3600*1000).toISOString() : undefined };
+      const reg = { id: uid(), name, email, phone, status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() };
       store.registrations.push(reg); saveStore(store);
-      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'pending', message: 'La solicitud queda guardada hasta que el administrador la revise.' });
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'approved', message: 'Solicitud aprobada automáticamente.' });
     }
 
     // ---- Config / sesión (panel web) ----
@@ -380,11 +385,11 @@ const server = http.createServer(async (req, res) => {
       if (!otp || Date.now() > otp.expiresAt || String(body.code).trim() !== otp.code) {
         return sendJson(res, 400, { ok: false, error: 'invalid_code', message: 'El código no es válido.' });
       }
-      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, status: isFixedPhone(otp.details.phone) ? 'approved' : 'pending', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString() };
+      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, status: 'approved', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() };
       store.registrations.push(reg);
       delete store.otps[body.challengeId];
       saveStore(store);
-      return sendJson(res, 200, { ok: true, registrationId: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'pending' });
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'approved' });
     }
     if (p === '/api/registration/status' && req.method === 'GET') {
       const reg = findReg(url.searchParams.get('id'));
