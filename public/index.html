@@ -15,12 +15,7 @@ button.ghost{background:transparent;color:#C4F5AD;border:1px solid #C4F5AD;width
 small{color:#aaa}
 </style></head><body><main>
 <h1>Ratbani · Panel de acceso</h1>
-<p>Servidor propio del panel de Ratbani. Aprobación y estado de acceso. El registro se hace solo desde la app.</p>
-
-<div class="card"><h2>Consulta tu estado</h2>
-<input id="status-id" placeholder="ID de tu solicitud">
-<button id="status-btn">Actualizar estado</button>
-<p id="status-msg"></p></div>
+<p>Panel de administración del acceso de Ratbani. El registro se hace solo desde la app.</p>
 
 <div class="card"><h2>Administrador</h2>
 <input id="admin-key" type="password" placeholder="Clave de administrador (ADMIN_KEY)">
@@ -36,12 +31,6 @@ async function api(path, opts={}){
   const r = await fetch(path, {headers:{'Content-Type':'application/json','x-acceso-admin':document.getElementById('admin-key').value||''}, ...opts});
   const d = await r.json(); if(!r.ok) throw new Error(d.message||('Error '+r.status)); return d;
 }
-document.getElementById('status-btn').addEventListener('click', async ()=>{
-  const id = document.getElementById('status-id').value.trim(); if(!id) return;
-  try{ const d = await api('/api/registration/status?id='+encodeURIComponent(id));
-    document.getElementById('status-msg').textContent = 'Estado: '+d.status;
-  }catch(err){ document.getElementById('status-msg').textContent = err.message; }
-});
 document.getElementById('admin-btn').addEventListener('click', async ()=>{
   try{
     const d = await api('/api/admin/registrations');
