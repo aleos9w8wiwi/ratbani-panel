@@ -26,22 +26,27 @@ Sirve a la APK Ratbani (pantalla de acceso) y al panel web del administrador.
 7. Create Web Service, espera a **Live**. La URL será como
    `https://ratbani-panel-xxxx.onrender.com`.
 
-## Planes de pago (7 días / 15 días / 20 días / 1 mes / 2 meses / único)
+## Planes de pago (1 día / 7 días / 15 días / 20 días / 1 mes / 2 meses / único)
 
 Cada solicitud tiene un plan. El registro nuevo entra como **1 mes** (30 días).
-El admin lo cambia en el panel con los botones **7 días**, **15 días**,
+El admin lo cambia en el panel con los botones **1 día**, **7 días**, **15 días**,
 **20 días**, **1 mes**, **2 meses** o **Único**, o con
 `PATCH /api/admin/registrations/:id`
-`{action:"set-plan", plan:"7d"|"15d"|"20d"|"mensual"|"2m"|"unico"}`.
+`{action:"set-plan", plan:"1d"|"7d"|"15d"|"20d"|"mensual"|"2m"|"unico"}`.
 Marcar el plan significa que la persona pagó: se activa con su vigencia
 desde ese momento (`paidAt`).
 
-- **7 / 15 / 20 días, 1 mes, 2 meses**: la cuenta atrás corre (se ve en el
+- **1 / 7 / 15 / 20 días, 1 mes, 2 meses**: la cuenta atrás corre (se ve en el
   panel como `29d 23h 58m` y va bajando cada segundo). Al llegar a cero el
   servidor devuelve `allowed:false` / `status:"expired"` y la APK ya no abre.
   Si paga otra vez, el admin vuelve a poner el plan y la vigencia
   empieza de nuevo.
 - **Único**: pago único, sin vencimiento (se ve como `Sin vencimiento`).
+
+**Rechazar y volver a registrarse**: el botón **Rechazar** deja la solicitud
+guardada como rechazada (se sigue viendo en el panel) pero libera el número:
+la persona puede registrarse de nuevo desde la app con ese mismo teléfono y
+le llega una solicitud nueva. Su registro viejo ya no abre la app.
 
 ## Admin
 

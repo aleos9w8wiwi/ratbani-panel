@@ -33,7 +33,7 @@ async function api(path, opts={}){
   const r = await fetch(path, {headers:{'Content-Type':'application/json','x-acceso-admin':document.getElementById('admin-key').value||''}, ...opts});
   const d = await r.json(); if(!r.ok) throw new Error(d.message||('Error '+r.status)); return d;
 }
-const PLAN_LABEL = {'7d':'7 DÍAS','15d':'15 DÍAS','20d':'20 DÍAS','mensual':'1 MES','2m':'2 MESES','unico':'ÚNICO'};
+const PLAN_LABEL = {'1d':'1 DÍA','7d':'7 DÍAS','15d':'15 DÍAS','20d':'20 DÍAS','mensual':'1 MES','2m':'2 MESES','unico':'ÚNICO'};
 function fmtRemaining(lease){
   if(!lease) return 'Sin vencimiento';
   const ms = Date.parse(lease) - Date.now();
@@ -54,6 +54,7 @@ document.getElementById('admin-btn').addEventListener('click', async ()=>{
       <button class="ghost" data-id="${r.id}" data-act="approve">Aprobar</button>
       <button class="ghost" data-id="${r.id}" data-act="reject">Rechazar</button>
       <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="1d">1 día</button>
       <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="7d">7 días</button>
       <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="15d">15 días</button>
       <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="20d">20 días</button>

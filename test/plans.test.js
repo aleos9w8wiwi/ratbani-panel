@@ -66,6 +66,12 @@ async function stopServer() {
     const t3c = d2m.data.registration.plan === '2m' && lease2m > 59 * 86400e3 && lease2m <= 60 * 86400e3;
     console.log('3c. plan 2 meses:', d2m.data.registration.plan, '| lease ~60d:', t3c);
 
+    // 3d. Plan de 1 día -> vigencia ~1 día.
+    const d1 = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'set-plan', plan: '1d' }, ADMIN);
+    const lease1 = Date.parse(d1.data.registration.leaseExpiresAt || '') - Date.now();
+    const t3d = d1.data.registration.plan === '1d' && lease1 > 0 && lease1 <= 1 * 86400e3;
+    console.log('3d. plan 1 día:', d1.data.registration.plan, '| lease ~1d:', t3d);
+
     // 4. Estado del dispositivo antes de vencer -> permitido.
     const st1 = await j('GET', '/api/device/status?registrationId=' + regId);
     const t4 = st1.data.allowed === true && st1.data.status === 'approved';
@@ -88,7 +94,21 @@ async function stopServer() {
     const t6 = st3.data.allowed === true && st3.data.status === 'approved';
     console.log('6. tras pagar de nuevo: allowed=' + st3.data.allowed, '|', t6);
 
-    const ok = t1 && t2 && t3 && t3b && t3c && t4 && t5 && t6;
+    // 7. Rechazar libera el teléfono: la persona puede registrarse de nuevo.
+    const regB = await j('POST', '/api/registration/manual', { name: 'Rechazado', email: 'rechazado@test.com', phone: '+522222222222' });
+    const regBId = regB.data.registrationId;
+    const rej = await j('PATCH', '/api/admin/registrations/' + regBId, { action: 'reject' }, ADMIN);
+    const t7a = rej.data.registration.status === 'rejected' && rej.data.registration.archived === true;
+    const stOld = await j('GET', '/api/device/status?registrationId=' + regBId);
+    const t7b = stOld.data.allowed === false && stOld.data.status === 'rejected';
+    const regC = await j('POST', '/api/registration/manual', { name: 'Rechazado Otra Vez', email: 'rechazado2@test.com', phone: '+522222222222' });
+    const t7c = regC.data.registrationId !== regBId && regC.data.status === 'approved';
+    const list = await j('GET', '/api/admin/registrations', null, ADMIN);
+    const oldStillThere = list.data.registrations.some(r => r.id === regBId && r.status === 'rejected');
+    const t7 = t7a && t7b && t7c && oldStillThere;
+    console.log('7. rechazar y registrar de nuevo:', '| rechazado+archivado:', t7a, '| viejo bloqueado:', t7b, '| nuevo aprobado:', t7c, '| viejo visible:', oldStillThere, '|', t7);
+
+    const ok = t1 && t2 && t3 && t3b && t3c && t3d && t4 && t5 && t6 && t7;
     console.log(ok ? 'TODO OK' : 'FALLO ALGO');
     process.exitCode = ok ? 0 : 1;
   } catch (e) {

@@ -29,13 +29,21 @@ async function j(method, path, body, headers = {}) {
   const claim = await j('POST', '/api/device/claim', { challengeId: ch2.data.challengeId, signature: sig2, publicKey: pub2B64, phone: '+522222222222' });
   console.log('3. claim teléfono nuevo:', 'status=' + claim.data.status);
 
-  // 4. El admin rechaza a alguien; si se vuelve a registrar, NO se auto-aprueba.
+  // 4. Rechazar libera el teléfono: si se vuelve a registrar, le llega
+  // una solicitud NUEVA aprobada (el registro viejo queda como rejected).
   const reg3 = await j('POST', '/api/registration/manual', { name: 'Rechazado', email: 'rej@test.com', phone: '+523333333333' });
   await j('PATCH', '/api/admin/registrations/' + reg3.data.registrationId, { action: 'reject' }, { 'x-acceso-admin': 'test123' });
   const reg4 = await j('POST', '/api/registration/manual', { name: 'Rechazado', email: 'rej@test.com', phone: '+523333333333' });
-  console.log('4. re-registro tras rechazo del admin:', 'status=' + reg4.data.status);
+  console.log('4. re-registro tras rechazo del admin:', 'status=' + reg4.data.status, '| nuevo id:', reg4.data.registrationId !== reg3.data.registrationId);
 
-  const ok = reg.data.status === 'approved' && st.data.allowed === true && claim.data.status === 'active' && reg4.data.status === 'rejected';
+  // 5. Desvincular (revoke) sí se respeta: si se vuelve a registrar, sigue
+  // bloqueado con el mismo registro viejo.
+  const reg5 = await j('POST', '/api/registration/manual', { name: 'Desvinculado', email: 'des@test.com', phone: '+524444444444' });
+  await j('PATCH', '/api/admin/registrations/' + reg5.data.registrationId, { action: 'revoke' }, { 'x-acceso-admin': 'test123' });
+  const reg6 = await j('POST', '/api/registration/manual', { name: 'Desvinculado', email: 'des@test.com', phone: '+524444444444' });
+  console.log('5. re-registro tras desvincular:', 'status=' + reg6.data.status, '| mismo id:', reg6.data.registrationId === reg5.data.registrationId);
+
+  const ok = reg.data.status === 'approved' && st.data.allowed === true && claim.data.status === 'active' && reg4.data.status === 'approved' && reg4.data.registrationId !== reg3.data.registrationId && reg6.data.status === 'revoked' && reg6.data.registrationId === reg5.data.registrationId;
   console.log(ok ? 'TODO OK' : 'FALLO ALGO');
   process.exit(ok ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

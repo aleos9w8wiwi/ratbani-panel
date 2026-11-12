@@ -8,12 +8,12 @@
 //   POST /api/device/status       -> estado firmado: la app manda {registrationId, challengeId, signature}
 //   GET  /api/device/status       -> mismo estado por query (panel/compatibilidad)
 //   POST /api/registration/manual -> registro manual: nombre, correo, teléfono
-// Planes de pago (ver PLAN_DAYS/normalizePlan/leaseForPlan): '7d' = 7 días,
-// '15d' = 15 días, '20d' = 20 días, 'mensual' = 1 mes (30 días),
+// Planes de pago (ver PLAN_DAYS/normalizePlan/leaseForPlan): '1d' = 1 día,
+// '7d' = 7 días, '15d' = 15 días, '20d' = 20 días, 'mensual' = 1 mes (30 días),
 // '2m' = 2 meses (60 días), 'unico' = pago único sin vencimiento.
 // La cuenta atrás corre hasta cero y entonces el acceso se cierra.
 // El admin asigna el plan con PATCH .../registrations/:id
-// {action:'set-plan', plan:'7d'|'15d'|'20d'|'mensual'|'2m'|'unico'}
+// {action:'set-plan', plan:'1d'|'7d'|'15d'|'20d'|'mensual'|'2m'|'unico'}
 // (eso marca el pago y activa).
 // Además sirve el panel web (misma API que el panel original):
 //   GET  /api/config, /api/session
@@ -244,11 +244,11 @@ function isAdmin(req) {
   } catch { return false; }
 }
 function findReg(id) { return store.registrations.find(r => r.id === id); }
-// Planes de pago: '7d' = 7 días, '15d' = 15 días, '20d' = 20 días,
-// 'mensual' = 1 mes (30 días), '2m' = 2 meses (60 días),
+// Planes de pago: '1d' = 1 día, '7d' = 7 días, '15d' = 15 días,
+// '20d' = 20 días, 'mensual' = 1 mes (30 días), '2m' = 2 meses (60 días),
 // 'unico' = pago único, sin vencimiento.
-const PLAN_DAYS = { '7d': 7, '15d': 15, '20d': 20, 'mensual': 30, '2m': 60 };
-function normalizePlan(p) { return (p === '7d' || p === '15d' || p === '20d' || p === 'mensual' || p === '2m' || p === 'unico') ? p : 'mensual'; }
+const PLAN_DAYS = { '1d': 1, '7d': 7, '15d': 15, '20d': 20, 'mensual': 30, '2m': 60 };
+function normalizePlan(p) { return (p === '1d' || p === '7d' || p === '15d' || p === '20d' || p === 'mensual' || p === '2m' || p === 'unico') ? p : 'mensual'; }
 function leaseForPlan(plan, phone) {
   if (isFixedPhone(phone)) return new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
   if (normalizePlan(plan) === 'unico') return null; // pago único: sin vencimiento
@@ -347,7 +347,9 @@ const server = http.createServer(async (req, res) => {
       } else if (pubB64) { reg.devicePublicKey = pubB64; }
       reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
       // Aprobación automática: una solicitud nueva o pendiente se aprueba sola.
-      // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
+      // Si el admin la desvinculó (revoke), su decisión se respeta. Un
+      // rechazo (reject) archiva la solicitud y libera el teléfono, así
+      // que esa persona puede registrarse de nuevo con una solicitud nueva.
       if (reg.status === 'pending') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = leaseForPlan(reg.plan, reg.phone); if (isFixedPhone(reg.phone)) reg.fixed = true; }
       const claimStatus = deviceStatusFor(reg);
       const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
@@ -430,7 +432,10 @@ const server = http.createServer(async (req, res) => {
       const existing = store.registrations.find(r => r.phone === phone && !r.archived);
       if (existing) {
         // Aprobación automática: si aún estaba pendiente, se aprueba sola.
-        // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
+        // Si el admin la desvinculó (revoke), su decisión se respeta. Un
+        // rechazo (reject) en cambio archiva la solicitud y libera el
+        // teléfono, así que esa persona puede registrarse de nuevo y aquí
+        // ya no aparece el registro viejo: llega uno nuevo aprobado.
         if (existing.status === 'pending') { existing.status = 'approved'; existing.authorizedAt = new Date().toISOString(); existing.leaseExpiresAt = leaseForPlan(existing.plan, existing.phone); saveStore(store); }
         return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, plan: existing.plan || 'mensual', leaseExpiresAt: existing.leaseExpiresAt || null, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
       }
@@ -507,7 +512,14 @@ const server = http.createServer(async (req, res) => {
         reg.authorizedAt = new Date().toISOString();
         reg.leaseExpiresAt = leaseForPlan(plan, reg.phone);
       }
-      else if (action === 'reject' || action === 'rejected') { reg.status = 'rejected'; }
+      else if (action === 'reject' || action === 'rejected') {
+        // Rechazar libera el teléfono: la solicitud queda guardada como
+        // 'rejected' (visible en el panel) pero archivada, así que la
+        // persona puede registrarse de nuevo desde la app con ese mismo
+        // número y le llega una solicitud nueva. Su registro viejo ya no
+        // abre la app (el estado por registrationId sigue siendo rejected).
+        reg.status = 'rejected'; reg.archived = true;
+      }
       else if (action === 'revoke' || action === 'revoked') { reg.status = 'revoked'; }
       else if (action === 'archive') { reg.archived = true; }
       else if (action === 'pending') { reg.status = 'pending'; }
