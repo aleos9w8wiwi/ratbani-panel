@@ -67,6 +67,11 @@ Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
   `UPSTASH_REDIS_REST_TOKEN` en las Environment Variables de Render y
   redespliega. Con eso, al arrancar el servidor restaura las solicitudes
   y la llave de firma desde Upstash y respalda cada cambio ahí.
+- OJO (bug corregido 2026-11-12): el respaldo mandaba el store con doble
+  codificación JSON y al leerlo la restauración fallaba en silencio, así que
+  cada despliegue borraba las solicitudes aunque Redis estuviera activo. Ya
+  está corregido (`parseKvJson` en server.js) y probado con
+  `test/persistence.test.js` (modos raw y parsed, más valores viejos).
 - El registro web no manda SMS en el plan gratis: el código de
   verificación se ve en el panel de admin.
 - La APK Ratbani apunta hoy a otro origen (`ratbani-panel-nuevo-...`).

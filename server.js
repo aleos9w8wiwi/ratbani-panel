@@ -104,17 +104,35 @@ async function kvGet(key) {
   if (!KV_ENABLED) return null;
   try {
     const r = await fetch(`${KV_URL}/get/${encodeURIComponent(key)}`, { headers: { Authorization: `Bearer ${KV_TOKEN}` } });
-    if (!r.ok) return null;
+    if (!r.ok) { console.error('[persistencia] kvGet falló:', key, 'HTTP', r.status); return null; }
     const j = await r.json();
-    return j && j.result ? j.result : null;
-  } catch { return null; }
+    return (j && j.result !== undefined && j.result !== null) ? j.result : null;
+  } catch (e) { console.error('[persistencia] kvGet error:', key, e.message || e); return null; }
 }
 async function kvSet(key, value) {
   if (!KV_ENABLED) return false;
   try {
-    const r = await fetch(`${KV_URL}/set/${encodeURIComponent(key)}`, { method: 'POST', headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
-    return r.ok;
-  } catch { return false; }
+    // El valor ya viene como texto (JSON) en las llamadas actuales: se manda
+    // tal cual. Antes se volvía a codificar con JSON.stringify y Upstash
+    // guardaba el texto con las comillas escapadas, así que al leerlo el
+    // JSON.parse devolvía un texto y no el objeto: la restauración fallaba
+    // en silencio y cada despliegue borraba las solicitudes.
+    const body = typeof value === 'string' ? value : JSON.stringify(value);
+    const r = await fetch(`${KV_URL}/set/${encodeURIComponent(key)}`, { method: 'POST', headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' }, body });
+    if (!r.ok) { console.error('[persistencia] kvSet falló:', key, 'HTTP', r.status); return false; }
+    return true;
+  } catch (e) { console.error('[persistencia] kvSet error:', key, e.message || e); return false; }
+}
+// Descodifica un valor leído de Redis: puede venir como objeto (si la API
+// REST lo devolvió ya interpretado), como texto JSON, o como texto JSON con
+// doble codificación (valores guardados con el bug anterior). Devuelve el
+// objeto o null.
+function parseKvJson(text) {
+  let v = text;
+  for (let i = 0; i < 3 && typeof v === 'string'; i++) {
+    try { v = JSON.parse(v); } catch { return null; }
+  }
+  return (v && typeof v === 'object') ? v : null;
 }
 function scheduleBackup() {
   if (!KV_ENABLED || backupTimer) return;
@@ -176,11 +194,13 @@ async function initServerKey() {
     const remote = await kvGet(SERVERKEY_KV_KEY);
     if (remote) {
       try {
-        const j = JSON.parse(remote);
-        serverKey = crypto.createPrivateKey(j.privateKey);
-        serverPubPem = j.publicKey || null;
-        try { writeKeyFiles(j.privateKey, j.publicKey); } catch {}
-        return;
+        const j = parseKvJson(remote);
+        if (j && j.privateKey) {
+          serverKey = crypto.createPrivateKey(j.privateKey);
+          serverPubPem = j.publicKey || null;
+          try { writeKeyFiles(j.privateKey, j.publicKey); } catch {}
+          return;
+        }
       } catch {}
     }
   }
@@ -539,8 +559,8 @@ const server = http.createServer(async (req, res) => {
   if (KV_ENABLED) {
     try {
       const remote = await kvGet(STORE_KV_KEY);
-      if (remote) {
-        const parsed = JSON.parse(remote);
+      if (remote !== null && remote !== undefined) {
+        const parsed = parseKvJson(remote);
         if (parsed && Array.isArray(parsed.registrations)) {
           store = {
             registrations: parsed.registrations || [],
@@ -551,10 +571,15 @@ const server = http.createServer(async (req, res) => {
           };
           try { fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true }); fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)); } catch {}
           console.log(`[persistencia] store restaurado desde Redis externo (${store.registrations.length} registros)`);
+        } else {
+          console.error('[persistencia] el store en Redis no se pudo interpretar (se empieza vacío, no se sobrescribe)');
         }
-      } else if (store.registrations.length || store.accessLog.length) {
-        await kvSet(STORE_KV_KEY, JSON.stringify(store));
-        console.log('[persistencia] store local subido a Redis externo');
+      } else {
+        console.log('[persistencia] sin datos del store en Redis externo (se empieza vacío)');
+        if (store.registrations.length || store.accessLog.length) {
+          await kvSet(STORE_KV_KEY, JSON.stringify(store));
+          console.log('[persistencia] store local subido a Redis externo');
+        }
       }
     } catch (e) { console.error('[persistencia] no se pudo restaurar store externo:', e.message || e); }
   }
