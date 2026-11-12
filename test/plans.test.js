@@ -1,4 +1,6 @@
 // Prueba local de los planes de pago (mensual / único) y la cuenta atrás.
+// Con acceso automático con tope de 10 (2026-11-12), el registro nuevo se
+// aprueba solo con su plan mensual (~30 días) si aún hay cupo.
 // Arranca su propio servidor en el puerto 3106 con un DATA_DIR temporal.
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -36,11 +38,12 @@ async function stopServer() {
   try {
     await startServer(dataDir);
 
-    // 1. Registro manual nuevo -> queda PENDIENTE (sin acceso automático),
-    // plan mensual, sin vigencia hasta que el admin lo apruebe.
+    // 1. Registro manual nuevo -> se aprueba SOLO (hay cupo) con plan
+    // mensual y vigencia de ~30 días.
     const reg = await j('POST', '/api/registration/manual', { name: 'Plan Mensual', email: 'mensual@test.com', phone: '+521111111111' });
-    const t1 = reg.data.status === 'pending' && reg.data.plan === 'mensual' && reg.data.leaseExpiresAt === null;
-    console.log('1. registro pendiente:', reg.data.status, '| plan:', reg.data.plan, '| lease:', reg.data.leaseExpiresAt, '|', t1);
+    const leaseA = reg.data.leaseExpiresAt ? Date.parse(reg.data.leaseExpiresAt) - Date.now() : 0;
+    const t1 = reg.data.status === 'approved' && reg.data.plan === 'mensual' && leaseA > 29 * 86400e3 && leaseA <= 30 * 86400e3;
+    console.log('1. registro aprobado solo:', reg.data.status, '| plan:', reg.data.plan, '| lease:', reg.data.leaseExpiresAt, '|', t1);
     const regId = reg.data.registrationId;
 
     // 1b. El admin lo aprueba -> aprobado con 30 días de vigencia.
@@ -108,11 +111,11 @@ async function stopServer() {
     const stOld = await j('GET', '/api/device/status?registrationId=' + regBId);
     const t7b = stOld.data.allowed === false && stOld.data.status === 'rejected';
     const regC = await j('POST', '/api/registration/manual', { name: 'Rechazado Otra Vez', email: 'rechazado2@test.com', phone: '+522222222222' });
-    const t7c = regC.data.registrationId !== regBId && regC.data.status === 'pending';
+    const t7c = regC.data.registrationId !== regBId && regC.data.status === 'approved';
     const list = await j('GET', '/api/admin/registrations', null, ADMIN);
     const oldStillThere = list.data.registrations.some(r => r.id === regBId && r.status === 'rejected');
     const t7 = t7a && t7b && t7c && oldStillThere;
-    console.log('7. rechazar y registrar de nuevo:', '| rechazado+archivado:', t7a, '| viejo bloqueado:', t7b, '| nuevo pendiente:', t7c, '| viejo visible:', oldStillThere, '|', t7);
+    console.log('7. rechazar y registrar de nuevo:', '| rechazado+archivado:', t7a, '| viejo bloqueado:', t7b, '| nuevo aprobado solo:', t7c, '| viejo visible:', oldStillThere, '|', t7);
 
     const ok = t1 && t1b && t2 && t3 && t3b && t3c && t3d && t4 && t5 && t6 && t7;
     console.log(ok ? 'TODO OK' : 'FALLO ALGO');

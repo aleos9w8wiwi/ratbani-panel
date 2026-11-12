@@ -97,7 +97,7 @@ async function roundTrip(mode, phone) {
   try {
     await startPanel(dir1);
     const reg = await j('POST', '/api/registration/manual', { name: 'Persistencia', email: 'pers@test.com', phone });
-    if (reg.data.status !== 'pending') return { ok: false, why: 'registro no quedó pendiente: ' + reg.data.status };
+    if (reg.data.status !== 'approved') return { ok: false, why: 'registro no quedó aprobado: ' + reg.data.status };
     await sleep(1200); // respaldo (debounce 300 ms)
     const keyBefore = JSON.parse(fs.readFileSync(path.join(dir1, 'server-key.json'), 'utf8'));
     await stopPanel();
@@ -105,7 +105,7 @@ async function roundTrip(mode, phone) {
     await startPanel(dir2);
     const h = await j('GET', '/health');
     const list = await j('GET', '/api/admin/registrations', null, ADMIN);
-    const found = (list.data.registrations || []).some(r => r.phone === phone && r.status === 'pending');
+    const found = (list.data.registrations || []).some(r => r.phone === phone && r.status === 'approved');
     const keyAfter = JSON.parse(fs.readFileSync(path.join(dir2, 'server-key.json'), 'utf8'));
     const keyOk = keyAfter.privateKey === keyBefore.privateKey;
     return { ok: h.data.registrations === 1 && found && keyOk, why: 'health=' + h.data.registrations + ' encontrado=' + found + ' llave=' + keyOk };

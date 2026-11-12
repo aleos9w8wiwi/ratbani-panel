@@ -67,7 +67,7 @@ const DESIGN = {
   logo: null,
   registration: {
     title: 'Solicita tu acceso',
-    description: 'Completa tus datos. Tu acceso se activa cuando el administrador lo apruebe.',
+    description: 'Completa tus datos y tu acceso se activa automáticamente.',
   },
   home: {
     enabled: true,
@@ -274,6 +274,20 @@ function leaseForPlan(plan, phone) {
   if (normalizePlan(plan) === 'unico') return null; // pago único: sin vencimiento
   return new Date(Date.now() + PLAN_DAYS[normalizePlan(plan)] * 24 * 3600 * 1000).toISOString();
 }
+// Acceso automático con tope: las solicitudes nuevas se aprueban solas
+// mientras las aprobadas no lleguen a AUTO_APPROVE_MAX (10). Al llegar al
+// tope, las nuevas quedan pendientes hasta que el admin las apruebe en el
+// panel. El usuario fijo (FIXED_PHONE) no cuenta para el tope.
+const AUTO_APPROVE_MAX = 10;
+function autoApproveAllowed(phone) {
+  if (isFixedPhone(phone)) return true;
+  const approved = store.registrations.filter(r => !r.archived && (r.status === 'approved' || r.status === 'active')).length;
+  return approved < AUTO_APPROVE_MAX;
+}
+function initialStatusFor(phone, plan) {
+  if (autoApproveAllowed(phone)) return { status: 'approved', authorizedAt: new Date().toISOString(), leaseExpiresAt: leaseForPlan(plan, phone) };
+  return { status: 'pending', authorizedAt: null, leaseExpiresAt: null };
+}
 function deviceStatusFor(reg) {
   if (!reg) return 'not_enrolled';
   // La mensualidad vencida cierra el acceso: al llegar a cero la app ya no abre.
@@ -362,17 +376,30 @@ const server = http.createServer(async (req, res) => {
       let reg = (body.registrationId || body.registration_id || ch.registrationId) ? findReg(body.registrationId || body.registration_id || ch.registrationId) : null;
       if (!reg && phone) reg = store.registrations.find(r => r.phone === phone && !r.archived) || null;
       if (!reg) {
-        // Sin acceso automático: la solicitud nueva queda pendiente hasta
-        // que el admin la apruebe en el panel (Aprobar o ponerle un plan).
-        // Solo el usuario fijo (FIXED_PHONE) entra aprobado directo.
-        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, plan: 'mensual', status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : null, leaseExpiresAt: isFixedPhone(phone) ? leaseForPlan('mensual', phone) : null };
+        // Acceso automático con tope de 10: la solicitud nueva se aprueba
+        // sola si aún hay cupo; si no, queda pendiente hasta que el admin
+        // la apruebe en el panel (Aprobar o ponerle un plan). Solo el
+        // usuario fijo (FIXED_PHONE) entra aprobado directo siempre.
+        const init = initialStatusFor(phone, 'mensual');
+        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, plan: 'mensual', status: init.status, fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
         store.registrations.push(reg);
-      } else if (pubB64) { reg.devicePublicKey = pubB64; }
+      } else {
+        if (pubB64) reg.devicePublicKey = pubB64;
+        // Acceso automático: si la solicitud estaba pendiente y aún hay
+        // cupo, el vínculo del dispositivo la aprueba (igual que un registro
+        // nuevo). La decisión del admin de desvincular se respeta: un
+        // registro revocado nunca se aprueba solo. Un rechazo (reject)
+        // archiva la solicitud y libera el teléfono, así que esa persona
+        // puede registrarse de nuevo.
+        if (reg.status === 'pending') {
+          const init = initialStatusFor(phone, reg.plan || 'mensual');
+          if (init.status === 'approved') { reg.status = 'approved'; reg.authorizedAt = init.authorizedAt; reg.leaseExpiresAt = init.leaseExpiresAt; }
+        }
+      }
       reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
-      // Sin acceso automático: una solicitud pendiente se queda pendiente
-      // hasta que el admin la apruebe. Si el admin la desvinculó (revoke),
-      // su decisión se respeta. Un rechazo (reject) archiva la solicitud
-      // y libera el teléfono, así que esa persona puede registrarse de nuevo.
+      // Con acceso automático, una solicitud pendiente solo se queda así si
+      // ya se llegó al tope de 10 aprobadas. Si el admin la desvinculó
+      // (revoke), su decisión se respeta.
       const claimStatus = deviceStatusFor(reg);
       const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
       const dev = { id: uid(), registrationId: reg.id, challengeId, publicKey: pubB64, signatureOk, statusToken, createdAt: new Date().toISOString() };
@@ -453,17 +480,17 @@ const server = http.createServer(async (req, res) => {
       }
       const existing = store.registrations.find(r => r.phone === phone && !r.archived);
       if (existing) {
-        // Sin acceso automático: si ya existe una solicitud con ese teléfono
-        // se devuelve tal cual (pendiente, aprobada o desvinculada). Solo el
-        // admin la aprueba en el panel. Un rechazo archiva la solicitud y
-        // libera el teléfono, así que aquí ya no aparece el registro viejo:
-        // llega uno nuevo pendiente.
+        // Si ya existe una solicitud con ese teléfono se devuelve tal cual
+        // (pendiente, aprobada o desvinculada). Un rechazo archiva la
+        // solicitud y libera el teléfono, así que aquí ya no aparece el
+        // registro viejo: llega uno nuevo (aprobado solo si aún hay cupo).
         return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, plan: existing.plan || 'mensual', leaseExpiresAt: existing.leaseExpiresAt || null, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
       }
       const plan = normalizePlan(body.plan);
-      const reg = { id: uid(), name, email, phone, plan, status: isFixedPhone(phone) ? 'approved' : 'pending', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: isFixedPhone(phone) ? new Date().toISOString() : null, leaseExpiresAt: isFixedPhone(phone) ? leaseForPlan(plan, phone) : null };
+      const init = initialStatusFor(phone, plan);
+      const reg = { id: uid(), name, email, phone, plan, status: init.status, fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
       store.registrations.push(reg); saveStore(store);
-      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: reg.status, plan, leaseExpiresAt: reg.leaseExpiresAt || null, message: isFixedPhone(phone) ? 'Solicitud aprobada.' : 'Solicitud recibida. Espera la aprobación del administrador.' });
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: reg.status, plan, leaseExpiresAt: reg.leaseExpiresAt || null, message: reg.status === 'approved' ? 'Solicitud aprobada.' : 'Solicitud recibida. Espera la aprobación del administrador.' });
     }
 
     // ---- Config / sesión (panel web) ----
@@ -494,7 +521,8 @@ const server = http.createServer(async (req, res) => {
       if (!otp || Date.now() > otp.expiresAt || String(body.code).trim() !== otp.code) {
         return sendJson(res, 400, { ok: false, error: 'invalid_code', message: 'El código no es válido.' });
       }
-      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, plan: 'mensual', status: isFixedPhone(otp.details.phone) ? 'approved' : 'pending', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: isFixedPhone(otp.details.phone) ? new Date().toISOString() : null, leaseExpiresAt: isFixedPhone(otp.details.phone) ? leaseForPlan('mensual', otp.details.phone) : null };
+      const init = initialStatusFor(otp.details.phone, 'mensual');
+      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, plan: 'mensual', status: init.status, fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
       store.registrations.push(reg);
       delete store.otps[body.challengeId];
       saveStore(store);
