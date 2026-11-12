@@ -54,6 +54,18 @@ async function stopServer() {
     const t3 = mens.data.registration.plan === 'mensual' && leaseMs3 > 29 * 86400e3 && leaseMs3 <= 30 * 86400e3;
     console.log('3. plan mensual:', mens.data.registration.plan, '| lease ~30d:', t3);
 
+    // 3b. Plan de 7 días -> vigencia ~7 días.
+    const d7 = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'set-plan', plan: '7d' }, ADMIN);
+    const lease7 = Date.parse(d7.data.registration.leaseExpiresAt || '') - Date.now();
+    const t3b = d7.data.registration.plan === '7d' && lease7 > 6 * 86400e3 && lease7 <= 7 * 86400e3;
+    console.log('3b. plan 7 días:', d7.data.registration.plan, '| lease ~7d:', t3b);
+
+    // 3c. Plan de 2 meses -> vigencia ~60 días.
+    const d2m = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'set-plan', plan: '2m' }, ADMIN);
+    const lease2m = Date.parse(d2m.data.registration.leaseExpiresAt || '') - Date.now();
+    const t3c = d2m.data.registration.plan === '2m' && lease2m > 59 * 86400e3 && lease2m <= 60 * 86400e3;
+    console.log('3c. plan 2 meses:', d2m.data.registration.plan, '| lease ~60d:', t3c);
+
     // 4. Estado del dispositivo antes de vencer -> permitido.
     const st1 = await j('GET', '/api/device/status?registrationId=' + regId);
     const t4 = st1.data.allowed === true && st1.data.status === 'approved';
@@ -76,7 +88,7 @@ async function stopServer() {
     const t6 = st3.data.allowed === true && st3.data.status === 'approved';
     console.log('6. tras pagar de nuevo: allowed=' + st3.data.allowed, '|', t6);
 
-    const ok = t1 && t2 && t3 && t4 && t5 && t6;
+    const ok = t1 && t2 && t3 && t3b && t3c && t4 && t5 && t6;
     console.log(ok ? 'TODO OK' : 'FALLO ALGO');
     process.exitCode = ok ? 0 : 1;
   } catch (e) {

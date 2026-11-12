@@ -13,6 +13,7 @@ button.ghost{background:transparent;color:#C4F5AD;border:1px solid #C4F5AD;width
 .badge{padding:2px 8px;border-radius:20px;background:#333;font-size:13px}
 .badge.pending{background:#7a5b00}.badge.approved,.badge.active{background:#1e6b34}.badge.rejected,.badge.revoked{background:#7a1f1f}.badge.expired{background:#7a1f1f}
 .badge.mensual{background:#274b73}.badge.unico{background:#6b4d1e}
+.badge.plan{background:#274b73}
 .countdown{font-weight:700;color:#C4F5AD}
 small{color:#aaa}
 </style></head><body><main>
@@ -33,6 +34,7 @@ async function api(path, opts={}){
   const r = await fetch(path, {headers:{'Content-Type':'application/json','x-acceso-admin':document.getElementById('admin-key').value||''}, ...opts});
   const d = await r.json(); if(!r.ok) throw new Error(d.message||('Error '+r.status)); return d;
 }
+const PLAN_LABEL = {'7d':'7 DÍAS','15d':'15 DÍAS','20d':'20 DÍAS','mensual':'1 MES','2m':'2 MESES','unico':'ÚNICO'};
 function fmtRemaining(lease){
   if(!lease) return 'Sin vencimiento';
   const ms = Date.parse(lease) - Date.now();
@@ -49,12 +51,16 @@ document.getElementById('admin-btn').addEventListener('click', async ()=>{
   try{
     const d = await api('/api/admin/registrations');
     const list = document.getElementById('admin-list');
-    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <span class="badge ${r.plan||'mensual'}">${(r.plan||'mensual')==='unico'?'ÚNICO':'MENSUAL'}</span> <span class="countdown" data-lease="${r.leaseExpiresAt||''}">…</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
+    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <span class="badge plan">${PLAN_LABEL[r.plan||'mensual']||'MENSUAL'}</span> <span class="countdown" data-lease="${r.leaseExpiresAt||''}">…</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
       <button class="ghost" data-id="${r.id}" data-act="approve">Aprobar</button>
       <button class="ghost" data-id="${r.id}" data-act="reject">Rechazar</button>
       <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button>
-      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="mensual">Mensual (30 días)</button>
-      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="unico">Único (sin vencimiento)</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="7d">7 días</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="15d">15 días</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="20d">20 días</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="mensual">1 mes</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="2m">2 meses</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="unico">Único</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
     tickCountdowns();
     document.getElementById('otp-list').innerHTML = d.otps && d.otps.length ? '<h3>Códigos web pendientes</h3>' + d.otps.map(o=>`<p>${o.name} · ${o.phone} · código: <b>${o.code}</b></p>`).join('') : '';
     try{

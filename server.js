@@ -8,10 +8,13 @@
 //   POST /api/device/status       -> estado firmado: la app manda {registrationId, challengeId, signature}
 //   GET  /api/device/status       -> mismo estado por query (panel/compatibilidad)
 //   POST /api/registration/manual -> registro manual: nombre, correo, teléfono
-// Planes de pago (ver normalizePlan/leaseForPlan): 'mensual' = 30 días con
-// cuenta atrás (al llegar a cero el acceso se cierra), 'unico' = pago único
-// sin vencimiento. El admin asigna el plan con PATCH .../registrations/:id
-// {action:'set-plan', plan:'mensual'|'unico'} (eso marca el pago y activa).
+// Planes de pago (ver PLAN_DAYS/normalizePlan/leaseForPlan): '7d' = 7 días,
+// '15d' = 15 días, '20d' = 20 días, 'mensual' = 1 mes (30 días),
+// '2m' = 2 meses (60 días), 'unico' = pago único sin vencimiento.
+// La cuenta atrás corre hasta cero y entonces el acceso se cierra.
+// El admin asigna el plan con PATCH .../registrations/:id
+// {action:'set-plan', plan:'7d'|'15d'|'20d'|'mensual'|'2m'|'unico'}
+// (eso marca el pago y activa).
 // Además sirve el panel web (misma API que el panel original):
 //   GET  /api/config, /api/session
 //   GET  /api/admin/registrations, PATCH /api/admin/registrations/:id
@@ -241,12 +244,15 @@ function isAdmin(req) {
   } catch { return false; }
 }
 function findReg(id) { return store.registrations.find(r => r.id === id); }
-// Planes de pago: 'mensual' = 30 días con cuenta atrás, 'unico' = pago único, sin vencimiento.
-function normalizePlan(p) { return p === 'unico' ? 'unico' : 'mensual'; }
+// Planes de pago: '7d' = 7 días, '15d' = 15 días, '20d' = 20 días,
+// 'mensual' = 1 mes (30 días), '2m' = 2 meses (60 días),
+// 'unico' = pago único, sin vencimiento.
+const PLAN_DAYS = { '7d': 7, '15d': 15, '20d': 20, 'mensual': 30, '2m': 60 };
+function normalizePlan(p) { return (p === '7d' || p === '15d' || p === '20d' || p === 'mensual' || p === '2m' || p === 'unico') ? p : 'mensual'; }
 function leaseForPlan(plan, phone) {
   if (isFixedPhone(phone)) return new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
   if (normalizePlan(plan) === 'unico') return null; // pago único: sin vencimiento
-  return new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+  return new Date(Date.now() + PLAN_DAYS[normalizePlan(plan)] * 24 * 3600 * 1000).toISOString();
 }
 function deviceStatusFor(reg) {
   if (!reg) return 'not_enrolled';
