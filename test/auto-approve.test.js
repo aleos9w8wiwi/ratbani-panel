@@ -1,4 +1,7 @@
-// Prueba local de la aprobación automática (simula la app exacta).
+// Prueba local de la aprobación MANUAL (sin acceso automático).
+// El acceso automático se quitó el 2026-11-12: la solicitud nueva queda
+// PENDIENTE y solo el admin la aprueba en el panel (Aprobar o ponerle un plan).
+// Requiere un servidor corriendo en el puerto 3105 (ADMIN_KEY=test123).
 const crypto = require('crypto');
 const BASE = 'http://127.0.0.1:3105';
 async function j(method, path, body, headers = {}) {
@@ -10,18 +13,25 @@ async function j(method, path, body, headers = {}) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const pubB64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
-  // 1. Registro manual con llave de dispositivo -> debe salir aprobado.
-  const reg = await j('POST', '/api/registration/manual', { name: 'Prueba Auto', email: 'auto@test.com', phone: '+521111111111', publicKey: pubB64 });
+  // 1. Registro manual -> queda PENDIENTE (ya no se aprueba solo).
+  const reg = await j('POST', '/api/registration/manual', { name: 'Prueba Manual', email: 'manual@test.com', phone: '+521111111111', publicKey: pubB64 });
   console.log('1. registro manual:', reg.data.status, '|', reg.data.message);
   const regId = reg.data.registrationId;
 
-  // 2. Flujo de arranque de la app: reto -> firma -> status -> allowed:true.
+  // 2. Flujo de arranque de la app con registro pendiente -> NO abre.
   const ch = await j('POST', '/api/device/challenge', { registrationId: regId });
   const sig = crypto.sign(null, Buffer.from(ch.data.nonce), privateKey).toString('base64');
   const st = await j('POST', '/api/device/status', { registrationId: regId, challengeId: ch.data.challengeId, signature: sig });
-  console.log('2. status de la app:', 'allowed=' + st.data.allowed, '| status=' + st.data.status);
+  console.log('2. status pendiente:', 'allowed=' + st.data.allowed, '| status=' + st.data.status);
 
-  // 3. Claim con teléfono nuevo (sin registro) -> debe crearlo aprobado.
+  // 2b. El admin lo aprueba -> ahora sí abre.
+  await j('PATCH', '/api/admin/registrations/' + regId, { action: 'approve' }, { 'x-acceso-admin': 'test123' });
+  const ch2b = await j('POST', '/api/device/challenge', { registrationId: regId });
+  const sig2b = crypto.sign(null, Buffer.from(ch2b.data.nonce), privateKey).toString('base64');
+  const st2b = await j('POST', '/api/device/status', { registrationId: regId, challengeId: ch2b.data.challengeId, signature: sig2b });
+  console.log('2b. status tras aprobar:', 'allowed=' + st2b.data.allowed, '| status=' + st2b.data.status);
+
+  // 3. Claim con teléfono nuevo (sin registro) -> crea la solicitud pendiente.
   const { publicKey: pub2, privateKey: priv2 } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const pub2B64 = pub2.export({ type: 'spki', format: 'der' }).toString('base64');
   const ch2 = await j('POST', '/api/device/challenge', { phone: '+522222222222', publicKey: pub2B64 });
@@ -30,7 +40,7 @@ async function j(method, path, body, headers = {}) {
   console.log('3. claim teléfono nuevo:', 'status=' + claim.data.status);
 
   // 4. Rechazar libera el teléfono: si se vuelve a registrar, le llega
-  // una solicitud NUEVA aprobada (el registro viejo queda como rejected).
+  // una solicitud NUEVA pendiente (el registro viejo queda como rejected).
   const reg3 = await j('POST', '/api/registration/manual', { name: 'Rechazado', email: 'rej@test.com', phone: '+523333333333' });
   await j('PATCH', '/api/admin/registrations/' + reg3.data.registrationId, { action: 'reject' }, { 'x-acceso-admin': 'test123' });
   const reg4 = await j('POST', '/api/registration/manual', { name: 'Rechazado', email: 'rej@test.com', phone: '+523333333333' });
@@ -43,7 +53,7 @@ async function j(method, path, body, headers = {}) {
   const reg6 = await j('POST', '/api/registration/manual', { name: 'Desvinculado', email: 'des@test.com', phone: '+524444444444' });
   console.log('5. re-registro tras desvincular:', 'status=' + reg6.data.status, '| mismo id:', reg6.data.registrationId === reg5.data.registrationId);
 
-  const ok = reg.data.status === 'approved' && st.data.allowed === true && claim.data.status === 'active' && reg4.data.status === 'approved' && reg4.data.registrationId !== reg3.data.registrationId && reg6.data.status === 'revoked' && reg6.data.registrationId === reg5.data.registrationId;
+  const ok = reg.data.status === 'pending' && st.data.allowed === false && st.data.status === 'pending' && st2b.data.allowed === true && st2b.data.status === 'approved' && claim.data.status === 'pending' && reg4.data.status === 'pending' && reg4.data.registrationId !== reg3.data.registrationId && reg6.data.status === 'revoked' && reg6.data.registrationId === reg5.data.registrationId;
   console.log(ok ? 'TODO OK' : 'FALLO ALGO');
   process.exit(ok ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

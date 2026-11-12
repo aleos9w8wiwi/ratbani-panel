@@ -36,12 +36,18 @@ async function stopServer() {
   try {
     await startServer(dataDir);
 
-    // 1. Registro manual nuevo -> plan mensual, 30 días de vigencia.
+    // 1. Registro manual nuevo -> queda PENDIENTE (sin acceso automático),
+    // plan mensual, sin vigencia hasta que el admin lo apruebe.
     const reg = await j('POST', '/api/registration/manual', { name: 'Plan Mensual', email: 'mensual@test.com', phone: '+521111111111' });
-    const leaseMs = Date.parse(reg.data.leaseExpiresAt || '') - Date.now();
-    const t1 = reg.data.status === 'approved' && reg.data.plan === 'mensual' && leaseMs > 29 * 86400e3 && leaseMs <= 30 * 86400e3;
-    console.log('1. registro mensual:', reg.data.plan, '| lease ~30d:', t1, '|', reg.data.leaseExpiresAt);
+    const t1 = reg.data.status === 'pending' && reg.data.plan === 'mensual' && reg.data.leaseExpiresAt === null;
+    console.log('1. registro pendiente:', reg.data.status, '| plan:', reg.data.plan, '| lease:', reg.data.leaseExpiresAt, '|', t1);
     const regId = reg.data.registrationId;
+
+    // 1b. El admin lo aprueba -> aprobado con 30 días de vigencia.
+    const apr = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'approve' }, ADMIN);
+    const leaseApr = Date.parse(apr.data.registration.leaseExpiresAt || '') - Date.now();
+    const t1b = apr.data.registration.status === 'approved' && leaseApr > 29 * 86400e3 && leaseApr <= 30 * 86400e3;
+    console.log('1b. admin aprueba:', apr.data.registration.status, '| lease ~30d:', t1b);
 
     // 2. El admin marca pago único -> sin vencimiento.
     const unico = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'set-plan', plan: 'unico' }, ADMIN);
@@ -102,13 +108,13 @@ async function stopServer() {
     const stOld = await j('GET', '/api/device/status?registrationId=' + regBId);
     const t7b = stOld.data.allowed === false && stOld.data.status === 'rejected';
     const regC = await j('POST', '/api/registration/manual', { name: 'Rechazado Otra Vez', email: 'rechazado2@test.com', phone: '+522222222222' });
-    const t7c = regC.data.registrationId !== regBId && regC.data.status === 'approved';
+    const t7c = regC.data.registrationId !== regBId && regC.data.status === 'pending';
     const list = await j('GET', '/api/admin/registrations', null, ADMIN);
     const oldStillThere = list.data.registrations.some(r => r.id === regBId && r.status === 'rejected');
     const t7 = t7a && t7b && t7c && oldStillThere;
-    console.log('7. rechazar y registrar de nuevo:', '| rechazado+archivado:', t7a, '| viejo bloqueado:', t7b, '| nuevo aprobado:', t7c, '| viejo visible:', oldStillThere, '|', t7);
+    console.log('7. rechazar y registrar de nuevo:', '| rechazado+archivado:', t7a, '| viejo bloqueado:', t7b, '| nuevo pendiente:', t7c, '| viejo visible:', oldStillThere, '|', t7);
 
-    const ok = t1 && t2 && t3 && t3b && t3c && t3d && t4 && t5 && t6 && t7;
+    const ok = t1 && t1b && t2 && t3 && t3b && t3c && t3d && t4 && t5 && t6 && t7;
     console.log(ok ? 'TODO OK' : 'FALLO ALGO');
     process.exitCode = ok ? 0 : 1;
   } catch (e) {

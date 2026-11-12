@@ -50,6 +50,11 @@ le llega una solicitud nueva. Su registro viejo ya no abre la app.
 
 ## Admin
 
+**Sin acceso automático**: cada solicitud nueva llega como **pendiente** y la
+app no abre hasta que el admin la aprueba en el panel con **Aprobar** o con un
+botón de plan (eso además le pone su vigencia). El botón **Desvincular** quita
+el acceso y bloquea ese número; **Rechazar** lo deja registrarse de nuevo.
+
 Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
 "Ver solicitudes". Ahí apruebas, rechazas o desvinculas.
 
