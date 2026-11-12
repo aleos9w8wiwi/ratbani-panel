@@ -14,10 +14,11 @@ async function j(method, path, body, headers = {}) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const pubB64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
 
-  // 1. Registro manual con cupo libre -> se aprueba SOLO, con vigencia de 1 mes.
+  // 1. Registro manual con cupo libre -> se aprueba SOLO, con vigencia de 1 día
+  // (plan por defecto DEFAULT_PLAN).
   const reg = await j('POST', '/api/registration/manual', { name: 'Prueba Auto', email: 'auto@test.com', phone: '+521111111111', publicKey: pubB64 });
   const leaseMs = reg.data.leaseExpiresAt ? Date.parse(reg.data.leaseExpiresAt) - Date.now() : 0;
-  console.log('1. registro manual:', reg.data.status, '|', reg.data.message, '| vigencia ~30d:', leaseMs > 29 * 864e5 && leaseMs < 31 * 864e5);
+  console.log('1. registro manual:', reg.data.status, '|', reg.data.message, '| vigencia ~1d:', leaseMs > 0 && leaseMs <= 1 * 86400e3);
   const regId = reg.data.registrationId;
 
   // 2. Flujo de arranque de la app con registro aprobado -> SÍ abre.
@@ -70,7 +71,7 @@ async function j(method, path, body, headers = {}) {
   const regQ = await j('POST', '/api/registration/manual', { name: 'Tope 2', email: 'tope2@test.com', phone: '+528888888888' });
   console.log('8. tras aprobar a mano, la siguiente:', 'status=' + regQ.data.status);
 
-  const ok = reg.data.status === 'approved' && leaseMs > 29 * 864e5 && leaseMs < 31 * 864e5 && st.data.allowed === true && st.data.status === 'approved' && claim.data.status === 'active' && reg4.data.status === 'approved' && reg4.data.registrationId !== reg3.data.registrationId && reg6.data.status === 'revoked' && reg6.data.registrationId === reg5.data.registrationId && fillOk && regP.data.status === 'pending' && stP.data.allowed === false && regQ.data.status === 'pending';
+  const ok = reg.data.status === 'approved' && leaseMs > 0 && leaseMs <= 1 * 86400e3 && st.data.allowed === true && st.data.status === 'approved' && claim.data.status === 'active' && reg4.data.status === 'approved' && reg4.data.registrationId !== reg3.data.registrationId && reg6.data.status === 'revoked' && reg6.data.registrationId === reg5.data.registrationId && fillOk && regP.data.status === 'pending' && stP.data.allowed === false && regQ.data.status === 'pending';
   console.log(ok ? 'TODO OK' : 'FALLO ALGO');
   process.exit(ok ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

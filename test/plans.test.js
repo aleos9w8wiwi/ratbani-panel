@@ -1,6 +1,7 @@
 // Prueba local de los planes de pago (mensual / único) y la cuenta atrás.
 // Con acceso automático con tope de 10 (2026-11-12), el registro nuevo se
-// aprueba solo con su plan mensual (~30 días) si aún hay cupo.
+// aprueba solo con el plan por defecto (1 día, orden de Cuban 2026-11-12)
+// si aún hay cupo; el admin le puede cambiar el plan después.
 // Arranca su propio servidor en el puerto 3106 con un DATA_DIR temporal.
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -38,19 +39,20 @@ async function stopServer() {
   try {
     await startServer(dataDir);
 
-    // 1. Registro manual nuevo -> se aprueba SOLO (hay cupo) con plan
-    // mensual y vigencia de ~30 días.
+    // 1. Registro manual nuevo -> se aprueba SOLO (hay cupo) con el plan
+    // por defecto (1 día) y vigencia de ~1 día.
     const reg = await j('POST', '/api/registration/manual', { name: 'Plan Mensual', email: 'mensual@test.com', phone: '+521111111111' });
     const leaseA = reg.data.leaseExpiresAt ? Date.parse(reg.data.leaseExpiresAt) - Date.now() : 0;
-    const t1 = reg.data.status === 'approved' && reg.data.plan === 'mensual' && leaseA > 29 * 86400e3 && leaseA <= 30 * 86400e3;
+    const t1 = reg.data.status === 'approved' && reg.data.plan === '1d' && leaseA > 0 && leaseA <= 1 * 86400e3;
     console.log('1. registro aprobado solo:', reg.data.status, '| plan:', reg.data.plan, '| lease:', reg.data.leaseExpiresAt, '|', t1);
     const regId = reg.data.registrationId;
 
-    // 1b. El admin lo aprueba -> aprobado con 30 días de vigencia.
+    // 1b. El admin lo aprueba (otra vez) -> aprobado con 1 día de vigencia
+    // (su plan actual es 1 día).
     const apr = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'approve' }, ADMIN);
     const leaseApr = Date.parse(apr.data.registration.leaseExpiresAt || '') - Date.now();
-    const t1b = apr.data.registration.status === 'approved' && leaseApr > 29 * 86400e3 && leaseApr <= 30 * 86400e3;
-    console.log('1b. admin aprueba:', apr.data.registration.status, '| lease ~30d:', t1b);
+    const t1b = apr.data.registration.status === 'approved' && leaseApr > 0 && leaseApr <= 1 * 86400e3;
+    console.log('1b. admin aprueba:', apr.data.registration.status, '| lease ~1d:', t1b);
 
     // 2. El admin marca pago único -> sin vencimiento.
     const unico = await j('PATCH', '/api/admin/registrations/' + regId, { action: 'set-plan', plan: 'unico' }, ADMIN);

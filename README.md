@@ -73,10 +73,11 @@ Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
   está corregido (`parseKvJson` en server.js) y probado con
   `test/persistence.test.js` (modos raw y parsed, más valores viejos).
 - Acceso automático con TOPE de 10 (2026-11-12): las solicitudes nuevas se
-  aprueban solas con su plan (por defecto 1 mes) mientras las aprobadas no
-  lleguen a 10 (`AUTO_APPROVE_MAX` en server.js). Al llegar al tope, las
-  nuevas quedan pendientes hasta que el admin las apruebe en el panel. La
-  aprobación manual del admin no tiene tope. Un rechazo archiva la solicitud
+  aprueban solas con su plan (por defecto 1 día, `DEFAULT_PLAN` en server.js,
+  orden de Cuban 2026-11-12) mientras las aprobadas no lleguen a 10
+  (`AUTO_APPROVE_MAX` en server.js). Al llegar al tope, las nuevas quedan
+  pendientes hasta que el admin las apruebe en el panel. La aprobación
+  manual del admin no tiene tope. Un rechazo archiva la solicitud
   y libera el teléfono; una desvinculación (revoke) sigue bloqueándolo.
   Probado con `test/auto-approve.test.js` (aprobación sola, tope, rechazo
   y desvinculación).

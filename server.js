@@ -14,7 +14,8 @@
 // La cuenta atrás corre hasta cero y entonces el acceso se cierra.
 // El admin asigna el plan con PATCH .../registrations/:id
 // {action:'set-plan', plan:'1d'|'7d'|'15d'|'20d'|'mensual'|'2m'|'unico'}
-// (eso marca el pago y activa).
+// (eso marca el pago y activa). Las solicitudes nuevas entran con el plan
+// por defecto DEFAULT_PLAN (1 día, orden de Cuban 2026-11-12).
 // Además sirve el panel web (misma API que el panel original):
 //   GET  /api/config, /api/session
 //   GET  /api/admin/registrations, PATCH /api/admin/registrations/:id
@@ -268,6 +269,9 @@ function findReg(id) { return store.registrations.find(r => r.id === id); }
 // '20d' = 20 días, 'mensual' = 1 mes (30 días), '2m' = 2 meses (60 días),
 // 'unico' = pago único, sin vencimiento.
 const PLAN_DAYS = { '1d': 1, '7d': 7, '15d': 15, '20d': 20, 'mensual': 30, '2m': 60 };
+// Plan por defecto de las solicitudes nuevas: solo 1 día (orden de Cuban,
+// 2026-11-12). El admin puede cambiarle el plan a cada persona en el panel.
+const DEFAULT_PLAN = '1d';
 function normalizePlan(p) { return (p === '1d' || p === '7d' || p === '15d' || p === '20d' || p === 'mensual' || p === '2m' || p === 'unico') ? p : 'mensual'; }
 function leaseForPlan(plan, phone) {
   if (isFixedPhone(phone)) return new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
@@ -380,8 +384,8 @@ const server = http.createServer(async (req, res) => {
         // sola si aún hay cupo; si no, queda pendiente hasta que el admin
         // la apruebe en el panel (Aprobar o ponerle un plan). Solo el
         // usuario fijo (FIXED_PHONE) entra aprobado directo siempre.
-        const init = initialStatusFor(phone, 'mensual');
-        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, plan: 'mensual', status: init.status, fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
+        const init = initialStatusFor(phone, DEFAULT_PLAN);
+        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, plan: DEFAULT_PLAN, status: init.status, fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
         store.registrations.push(reg);
       } else {
         if (pubB64) reg.devicePublicKey = pubB64;
@@ -392,7 +396,7 @@ const server = http.createServer(async (req, res) => {
         // archiva la solicitud y libera el teléfono, así que esa persona
         // puede registrarse de nuevo.
         if (reg.status === 'pending') {
-          const init = initialStatusFor(phone, reg.plan || 'mensual');
+          const init = initialStatusFor(phone, reg.plan || DEFAULT_PLAN);
           if (init.status === 'approved') { reg.status = 'approved'; reg.authorizedAt = init.authorizedAt; reg.leaseExpiresAt = init.leaseExpiresAt; }
         }
       }
@@ -484,9 +488,9 @@ const server = http.createServer(async (req, res) => {
         // (pendiente, aprobada o desvinculada). Un rechazo archiva la
         // solicitud y libera el teléfono, así que aquí ya no aparece el
         // registro viejo: llega uno nuevo (aprobado solo si aún hay cupo).
-        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, plan: existing.plan || 'mensual', leaseExpiresAt: existing.leaseExpiresAt || null, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
+        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, plan: existing.plan || DEFAULT_PLAN, leaseExpiresAt: existing.leaseExpiresAt || null, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
       }
-      const plan = normalizePlan(body.plan);
+      const plan = body.plan ? normalizePlan(body.plan) : DEFAULT_PLAN;
       const init = initialStatusFor(phone, plan);
       const reg = { id: uid(), name, email, phone, plan, status: init.status, fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
       store.registrations.push(reg); saveStore(store);
@@ -521,8 +525,8 @@ const server = http.createServer(async (req, res) => {
       if (!otp || Date.now() > otp.expiresAt || String(body.code).trim() !== otp.code) {
         return sendJson(res, 400, { ok: false, error: 'invalid_code', message: 'El código no es válido.' });
       }
-      const init = initialStatusFor(otp.details.phone, 'mensual');
-      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, plan: 'mensual', status: init.status, fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
+      const init = initialStatusFor(otp.details.phone, DEFAULT_PLAN);
+      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, plan: DEFAULT_PLAN, status: init.status, fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: init.authorizedAt, leaseExpiresAt: init.leaseExpiresAt };
       store.registrations.push(reg);
       delete store.otps[body.challengeId];
       saveStore(store);
@@ -531,7 +535,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/registration/status' && req.method === 'GET') {
       const reg = findReg(url.searchParams.get('id'));
       if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found', message: 'Solicitud no encontrada.' });
-      return sendJson(res, 200, { ok: true, status: deviceStatusFor(reg), plan: reg.plan || 'mensual', registrationId: reg.id, authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null });
+      return sendJson(res, 200, { ok: true, status: deviceStatusFor(reg), plan: reg.plan || DEFAULT_PLAN, registrationId: reg.id, authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null });
     }
 
     // ---- Admin ----
