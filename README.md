@@ -26,6 +26,21 @@ Sirve a la APK Ratbani (pantalla de acceso) y al panel web del administrador.
 7. Create Web Service, espera a **Live**. La URL será como
    `https://ratbani-panel-xxxx.onrender.com`.
 
+## Planes de pago (único / mensual)
+
+Cada solicitud tiene un plan. El registro nuevo entra como **mensual** (30 días).
+El admin lo cambia en el panel con los botones **Mensual (30 días)** o
+**Único (sin vencimiento)**, o con `PATCH /api/admin/registrations/:id`
+`{action:"set-plan", plan:"mensual"|"unico"}`. Marcar el plan significa que
+la persona pagó: se activa con su vigencia desde ese momento (`paidAt`).
+
+- **Mensual**: la cuenta atrás corre 30 días (se ve en el panel como
+  `29d 23h 58m` y va bajando cada segundo). Al llegar a cero el servidor
+  devuelve `allowed:false` / `status:"expired"` y la APK ya no abre.
+  Si paga otra vez, el admin vuelve a poner **Mensual** y los 30 días
+  empiezan de nuevo.
+- **Único**: pago único, sin vencimiento (se ve como `Sin vencimiento`).
+
 ## Admin
 
 Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
@@ -35,7 +50,11 @@ Abre la URL, baja a Administrador, pon tu `ADMIN_KEY` y toca
 
 - Los datos se guardan en `data/store.json`. En el plan gratis de Render
   el disco es efímero: si el servicio se reinicia, las solicitudes se
-  pierden. Para uso serio, pon una base de datos.
+  pierden. Para que sobrevivan gratis: crea una base Redis en Upstash
+  (plan gratis), copia su `UPSTASH_REDIS_REST_URL` y
+  `UPSTASH_REDIS_REST_TOKEN` en las Environment Variables de Render y
+  redespliega. Con eso, al arrancar el servidor restaura las solicitudes
+  y la llave de firma desde Upstash y respalda cada cambio ahí.
 - El registro web no manda SMS en el plan gratis: el código de
   verificación se ve en el panel de admin.
 - La APK Ratbani apunta hoy a otro origen (`ratbani-panel-nuevo-...`).

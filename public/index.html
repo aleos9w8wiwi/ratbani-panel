@@ -11,7 +11,9 @@ button{background:#C4F5AD;color:#101611;font-weight:700;border:0;cursor:pointer}
 button.ghost{background:transparent;color:#C4F5AD;border:1px solid #C4F5AD;width:auto;padding:6px 12px;margin:2px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .badge{padding:2px 8px;border-radius:20px;background:#333;font-size:13px}
-.badge.pending{background:#7a5b00}.badge.approved,.badge.active{background:#1e6b34}.badge.rejected,.badge.revoked{background:#7a1f1f}
+.badge.pending{background:#7a5b00}.badge.approved,.badge.active{background:#1e6b34}.badge.rejected,.badge.revoked{background:#7a1f1f}.badge.expired{background:#7a1f1f}
+.badge.mensual{background:#274b73}.badge.unico{background:#6b4d1e}
+.countdown{font-weight:700;color:#C4F5AD}
 small{color:#aaa}
 </style></head><body><main>
 <h1>Ratbani · Panel de acceso</h1>
@@ -31,21 +33,36 @@ async function api(path, opts={}){
   const r = await fetch(path, {headers:{'Content-Type':'application/json','x-acceso-admin':document.getElementById('admin-key').value||''}, ...opts});
   const d = await r.json(); if(!r.ok) throw new Error(d.message||('Error '+r.status)); return d;
 }
+function fmtRemaining(lease){
+  if(!lease) return 'Sin vencimiento';
+  const ms = Date.parse(lease) - Date.now();
+  if(ms <= 0) return 'Vencido';
+  const s = Math.floor(ms/1000);
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60), ss = s%60;
+  return d > 0 ? `⏳ ${d}d ${h}h ${m}m` : `⏳ ${h}h ${m}m ${ss}s`;
+}
+function tickCountdowns(){
+  document.querySelectorAll('.countdown').forEach(el=>{ el.textContent = fmtRemaining(el.dataset.lease); });
+}
+setInterval(tickCountdowns, 1000);
 document.getElementById('admin-btn').addEventListener('click', async ()=>{
   try{
     const d = await api('/api/admin/registrations');
     const list = document.getElementById('admin-list');
-    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
+    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <span class="badge ${r.plan||'mensual'}">${(r.plan||'mensual')==='unico'?'ÚNICO':'MENSUAL'}</span> <span class="countdown" data-lease="${r.leaseExpiresAt||''}">…</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
       <button class="ghost" data-id="${r.id}" data-act="approve">Aprobar</button>
       <button class="ghost" data-id="${r.id}" data-act="reject">Rechazar</button>
-      <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
+      <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="mensual">Mensual (30 días)</button>
+      <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="unico">Único (sin vencimiento)</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
+    tickCountdowns();
     document.getElementById('otp-list').innerHTML = d.otps && d.otps.length ? '<h3>Códigos web pendientes</h3>' + d.otps.map(o=>`<p>${o.name} · ${o.phone} · código: <b>${o.code}</b></p>`).join('') : '';
     try{
       const log = await api('/api/admin/access-log');
       document.getElementById('log-list').innerHTML = log.accessLog.map(e=>`<p><small>${e.at||''} · ${e.ip||'-'} · ${e.method} ${e.path} · ${e.userAgent||''}</small></p>`).join('') || '<p>Sin accesos registrados.</p>';
     }catch(e){ document.getElementById('log-list').textContent = ''; }
     list.querySelectorAll('button[data-id]').forEach(b=>b.addEventListener('click', async ()=>{
-      await api('/api/admin/registrations/'+encodeURIComponent(b.dataset.id),{method:'PATCH',body:JSON.stringify({action:b.dataset.act})});
+      await api('/api/admin/registrations/'+encodeURIComponent(b.dataset.id),{method:'PATCH',body:JSON.stringify({action:b.dataset.act, plan:b.dataset.plan||undefined})});
       document.getElementById('admin-btn').click();
     }));
   }catch(err){ document.getElementById('admin-list').textContent = err.message; }

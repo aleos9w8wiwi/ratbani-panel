@@ -8,16 +8,23 @@
 //   POST /api/device/status       -> estado firmado: la app manda {registrationId, challengeId, signature}
 //   GET  /api/device/status       -> mismo estado por query (panel/compatibilidad)
 //   POST /api/registration/manual -> registro manual: nombre, correo, teléfono
+// Planes de pago (ver normalizePlan/leaseForPlan): 'mensual' = 30 días con
+// cuenta atrás (al llegar a cero el acceso se cierra), 'unico' = pago único
+// sin vencimiento. El admin asigna el plan con PATCH .../registrations/:id
+// {action:'set-plan', plan:'mensual'|'unico'} (eso marca el pago y activa).
 // Además sirve el panel web (misma API que el panel original):
 //   GET  /api/config, /api/session
 //   GET  /api/admin/registrations, PATCH /api/admin/registrations/:id
 //   POST /api/registration/start, /api/registration/verify
 //   GET  /api/registration/status
 //
-// Sin dependencias: solo Node 18+ (http, crypto, fs).
-// Datos: se guardan en ./data/store.json (en Render gratis el disco es
-// efímero: si el servicio se reinicia, las solicitudes se pierden.
-// Para uso real, pon una base de datos. Para un panel personal, vale.)
+// Sin dependencias: solo Node 18+ (http, crypto, fs, fetch global).
+// Datos: se guardan en ./data/store.json. En Render gratis el disco es
+// efímero: si el servicio se reinicia o se duerme, las solicitudes se
+// pierden. Para que sobrevivan, configura UPSTASH_REDIS_REST_URL y
+// UPSTASH_REDIS_REST_TOKEN (Redis gratis de Upstash): el servidor
+// restaura el store y la llave de firma desde ahí al arrancar y hace
+// respaldo de cada cambio. Sin esas variables, se comporta igual que antes.
 //
 // Admin: pon la variable de entorno ADMIN_KEY en Render.
 // Por defecto es "ratbani-admin": CÁMBIALA antes de usarlo en serio.
@@ -38,8 +45,15 @@ const ADMIN_KEY = process.env.ADMIN_KEY || 'ratbani-admin';
 const FIXED_PHONE = (process.env.FIXED_PHONE || '').trim();
 const FIXED_NAME = process.env.FIXED_NAME || 'Usuario fijo';
 const FIXED_EMAIL = process.env.FIXED_EMAIL || '';
-const STORE_PATH = path.join(__dirname, 'data', 'store.json');
-const KEY_PATH = path.join(__dirname, 'data', 'server-key.json');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const STORE_PATH = path.join(DATA_DIR, 'store.json');
+const KEY_PATH = path.join(DATA_DIR, 'server-key.json');
+// Persistencia externa opcional (Upstash Redis REST, plan gratis).
+const KV_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
+const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const KV_ENABLED = !!(KV_URL && KV_TOKEN);
+const STORE_KV_KEY = process.env.STORE_KV_KEY || 'ratbani:store';
+const SERVERKEY_KV_KEY = process.env.SERVERKEY_KV_KEY || 'ratbani:server-key';
 
 const DESIGN = {
   schema: 1,
@@ -77,8 +91,40 @@ function loadStore() {
 function saveStore(s) {
   fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true });
   fs.writeFileSync(STORE_PATH, JSON.stringify(s, null, 2));
+  scheduleBackup();
 }
 let store = loadStore();
+
+// --- Respaldo externo (Upstash Redis REST, opcional) ---
+let backupTimer = null, backupInFlight = false, backupPending = false;
+async function kvGet(key) {
+  if (!KV_ENABLED) return null;
+  try {
+    const r = await fetch(`${KV_URL}/get/${encodeURIComponent(key)}`, { headers: { Authorization: `Bearer ${KV_TOKEN}` } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.result ? j.result : null;
+  } catch { return null; }
+}
+async function kvSet(key, value) {
+  if (!KV_ENABLED) return false;
+  try {
+    const r = await fetch(`${KV_URL}/set/${encodeURIComponent(key)}`, { method: 'POST', headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+    return r.ok;
+  } catch { return false; }
+}
+function scheduleBackup() {
+  if (!KV_ENABLED || backupTimer) return;
+  backupTimer = setTimeout(async () => {
+    backupTimer = null;
+    if (backupInFlight) { backupPending = true; return; }
+    backupInFlight = true;
+    try { await kvSet(STORE_KV_KEY, JSON.stringify(store)); } finally {
+      backupInFlight = false;
+      if (backupPending) { backupPending = false; scheduleBackup(); }
+    }
+  }, 300);
+}
 
 // Registro de accesos: IP, fecha, ruta, usuario/dispositivo, navegador/app.
 function clientIp(req) {
@@ -100,7 +146,8 @@ function logAccess(req, info = {}) {
 }
 function isFixedPhone(phone) { return FIXED_PHONE && phone && phone === FIXED_PHONE; }
 // Usuario fijo pre-aprobado (si FIXED_PHONE está puesto).
-if (FIXED_PHONE) {
+function ensureFixedUser() {
+  if (!FIXED_PHONE) return;
   let fixed = store.registrations.find(r => r.phone === FIXED_PHONE);
   if (!fixed) {
     fixed = { id: uid(), name: FIXED_NAME, email: FIXED_EMAIL, phone: FIXED_PHONE, status: 'approved', fixed: true, source: 'fixed', createdAt: new Date().toISOString(), authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString() };
@@ -111,24 +158,43 @@ if (FIXED_PHONE) {
 }
 
 // Clave del servidor para firmar tokens de activación (ECDSA P-256).
-// Se genera una vez y se guarda en data/server-key.json.
-function loadServerKey() {
+// Se genera una vez y se guarda en data/server-key.json. Si hay Redis
+// externo, se restaura de ahí (si no, los tokens firmados antes de un
+// reinicio de Render dejarían de valer).
+let serverKey = null;
+let serverPubPem = null;
+function writeKeyFiles(privPem, pubPem) {
+  fs.mkdirSync(path.dirname(KEY_PATH), { recursive: true });
+  fs.writeFileSync(KEY_PATH, JSON.stringify({ privateKey: privPem, publicKey: pubPem }, null, 2));
+  if (KV_ENABLED) void kvSet(SERVERKEY_KV_KEY, fs.readFileSync(KEY_PATH, 'utf8'));
+}
+async function initServerKey() {
+  if (KV_ENABLED) {
+    const remote = await kvGet(SERVERKEY_KV_KEY);
+    if (remote) {
+      try {
+        const j = JSON.parse(remote);
+        serverKey = crypto.createPrivateKey(j.privateKey);
+        serverPubPem = j.publicKey || null;
+        try { writeKeyFiles(j.privateKey, j.publicKey); } catch {}
+        return;
+      } catch {}
+    }
+  }
   try {
     const j = JSON.parse(fs.readFileSync(KEY_PATH, 'utf8'));
-    return crypto.createPrivateKey(j.privateKey);
-  } catch {
-    const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
-    const priv = privateKey.export({ type: 'pkcs8', format: 'pem' });
-    const pub = publicKey.export({ type: 'spki', format: 'pem' });
-    fs.mkdirSync(path.dirname(KEY_PATH), { recursive: true });
-    fs.writeFileSync(KEY_PATH, JSON.stringify({ privateKey: priv, publicKey: pub }, null, 2));
-    return crypto.createPrivateKey(priv);
-  }
+    serverKey = crypto.createPrivateKey(j.privateKey);
+    serverPubPem = j.publicKey || null;
+    if (KV_ENABLED) void kvSet(SERVERKEY_KV_KEY, fs.readFileSync(KEY_PATH, 'utf8'));
+    return;
+  } catch {}
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const priv = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const pub = publicKey.export({ type: 'spki', format: 'pem' });
+  serverKey = crypto.createPrivateKey(priv);
+  serverPubPem = pub;
+  try { writeKeyFiles(priv, pub); } catch {}
 }
-const serverKey = loadServerKey();
-const serverPubPem = (() => {
-  try { return JSON.parse(fs.readFileSync(KEY_PATH, 'utf8')).publicKey; } catch { return null; }
-})();
 
 function uid() { return crypto.randomUUID(); }
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
@@ -175,8 +241,17 @@ function isAdmin(req) {
   } catch { return false; }
 }
 function findReg(id) { return store.registrations.find(r => r.id === id); }
+// Planes de pago: 'mensual' = 30 días con cuenta atrás, 'unico' = pago único, sin vencimiento.
+function normalizePlan(p) { return p === 'unico' ? 'unico' : 'mensual'; }
+function leaseForPlan(plan, phone) {
+  if (isFixedPhone(phone)) return new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+  if (normalizePlan(plan) === 'unico') return null; // pago único: sin vencimiento
+  return new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+}
 function deviceStatusFor(reg) {
   if (!reg) return 'not_enrolled';
+  // La mensualidad vencida cierra el acceso: al llegar a cero la app ya no abre.
+  if ((reg.status === 'approved' || reg.status === 'active') && reg.leaseExpiresAt && Date.now() > Date.parse(reg.leaseExpiresAt)) return 'expired';
   return reg.status;
 }
 
@@ -261,22 +336,23 @@ const server = http.createServer(async (req, res) => {
       let reg = (body.registrationId || body.registration_id || ch.registrationId) ? findReg(body.registrationId || body.registration_id || ch.registrationId) : null;
       if (!reg && phone) reg = store.registrations.find(r => r.phone === phone && !r.archived) || null;
       if (!reg) {
-        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + (isFixedPhone(phone) ? 365 : 30) * 24 * 3600 * 1000).toISOString() };
+        reg = { id: uid(), name: body.name || null, email: body.email || null, phone, plan: 'mensual', status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'device', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: pubB64, authorizedAt: new Date().toISOString(), leaseExpiresAt: leaseForPlan('mensual', phone) };
         store.registrations.push(reg);
       } else if (pubB64) { reg.devicePublicKey = pubB64; }
       reg.lastIp = clientIp(req); reg.lastSeenAt = new Date().toISOString();
       // Aprobación automática: una solicitud nueva o pendiente se aprueba sola.
       // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
-      if (reg.status === 'pending') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + (isFixedPhone(reg.phone) ? 365 : 30) * 24 * 3600 * 1000).toISOString(); if (isFixedPhone(reg.phone)) reg.fixed = true; }
+      if (reg.status === 'pending') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = leaseForPlan(reg.plan, reg.phone); if (isFixedPhone(reg.phone)) reg.fixed = true; }
+      const claimStatus = deviceStatusFor(reg);
       const statusToken = tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) });
       const dev = { id: uid(), registrationId: reg.id, challengeId, publicKey: pubB64, signatureOk, statusToken, createdAt: new Date().toISOString() };
       store.devices.push(dev);
       delete store.challenges[challengeId];
       saveStore(store);
-      const approved = reg.status === 'approved' || reg.status === 'active';
+      const approved = claimStatus === 'approved' || claimStatus === 'active';
       return sendJson(res, 200, {
         ok: true,
-        status: approved ? 'active' : 'pending',
+        status: approved ? 'active' : claimStatus,
         registrationId: reg.id,
         registration_id: reg.id,
         statusToken,
@@ -349,12 +425,13 @@ const server = http.createServer(async (req, res) => {
       if (existing) {
         // Aprobación automática: si aún estaba pendiente, se aprueba sola.
         // Si el admin la rechazó o la desvinculó antes, su decisión se respeta.
-        if (existing.status === 'pending') { existing.status = 'approved'; existing.authorizedAt = new Date().toISOString(); existing.leaseExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(); saveStore(store); }
-        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
+        if (existing.status === 'pending') { existing.status = 'approved'; existing.authorizedAt = new Date().toISOString(); existing.leaseExpiresAt = leaseForPlan(existing.plan, existing.phone); saveStore(store); }
+        return sendJson(res, 200, { ok: true, registrationId: existing.id, registration_id: existing.id, statusToken: tokenFor({ sub: existing.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: existing.status, plan: existing.plan || 'mensual', leaseExpiresAt: existing.leaseExpiresAt || null, message: existing.status === 'approved' ? 'Solicitud aprobada.' : 'Este teléfono ya tiene otra solicitud guardada.' });
       }
-      const reg = { id: uid(), name, email, phone, status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() };
+      const plan = normalizePlan(body.plan);
+      const reg = { id: uid(), name, email, phone, plan, status: 'approved', fixed: isFixedPhone(phone) || undefined, source: 'manual', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), devicePublicKey: body.publicKey || body.public_key || null, authorizedAt: new Date().toISOString(), leaseExpiresAt: leaseForPlan(plan, phone) };
       store.registrations.push(reg); saveStore(store);
-      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'approved', message: 'Solicitud aprobada automáticamente.' });
+      return sendJson(res, 200, { ok: true, registrationId: reg.id, registration_id: reg.id, statusToken: tokenFor({ sub: reg.id, type: 'status', iat: Math.floor(Date.now() / 1000) }), status: 'approved', plan, leaseExpiresAt: reg.leaseExpiresAt || null, message: 'Solicitud aprobada automáticamente.' });
     }
 
     // ---- Config / sesión (panel web) ----
@@ -385,7 +462,7 @@ const server = http.createServer(async (req, res) => {
       if (!otp || Date.now() > otp.expiresAt || String(body.code).trim() !== otp.code) {
         return sendJson(res, 400, { ok: false, error: 'invalid_code', message: 'El código no es válido.' });
       }
-      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, status: 'approved', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString() };
+      const reg = { id: uid(), name: otp.details.name, email: otp.details.email, phone: otp.details.phone, plan: 'mensual', status: 'approved', fixed: isFixedPhone(otp.details.phone) || undefined, source: 'web', createdAt: new Date().toISOString(), ip: clientIp(req), lastIp: clientIp(req), lastSeenAt: new Date().toISOString(), authorizedAt: new Date().toISOString(), leaseExpiresAt: leaseForPlan('mensual', otp.details.phone) };
       store.registrations.push(reg);
       delete store.otps[body.challengeId];
       saveStore(store);
@@ -394,7 +471,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/registration/status' && req.method === 'GET') {
       const reg = findReg(url.searchParams.get('id'));
       if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found', message: 'Solicitud no encontrada.' });
-      return sendJson(res, 200, { ok: true, status: reg.status, registrationId: reg.id, authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null });
+      return sendJson(res, 200, { ok: true, status: deviceStatusFor(reg), plan: reg.plan || 'mensual', registrationId: reg.id, authorizedAt: reg.authorizedAt || null, leaseExpiresAt: reg.leaseExpiresAt || null });
     }
 
     // ---- Admin ----
@@ -413,7 +490,17 @@ const server = http.createServer(async (req, res) => {
       const reg = findReg(decodeURIComponent(m[1]));
       if (!reg) return sendJson(res, 404, { ok: false, error: 'not_found' });
       const action = body.action || body.status;
-      if (action === 'approve' || action === 'approved') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(); }
+      if (action === 'approve' || action === 'approved') { reg.status = 'approved'; reg.authorizedAt = new Date().toISOString(); reg.leaseExpiresAt = leaseForPlan(reg.plan, reg.phone); }
+      else if (action === 'set-plan' || action === 'set_plan' || action === 'plan') {
+        // El admin marca que esta persona pagó: se le asigna el plan y se activa con su vigencia.
+        // 'mensual' = 30 días con cuenta atrás; 'unico' = pago único, sin vencimiento.
+        const plan = normalizePlan(body.plan);
+        reg.plan = plan;
+        reg.paidAt = new Date().toISOString();
+        reg.status = 'approved';
+        reg.authorizedAt = new Date().toISOString();
+        reg.leaseExpiresAt = leaseForPlan(plan, reg.phone);
+      }
       else if (action === 'reject' || action === 'rejected') { reg.status = 'rejected'; }
       else if (action === 'revoke' || action === 'revoked') { reg.status = 'revoked'; }
       else if (action === 'archive') { reg.archived = true; }
@@ -429,7 +516,35 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`ratbani-panel escuchando en puerto ${PORT}`);
-  console.log('Panel: /  |  Salud: /health  |  Diseño: /api/design');
-});
+(async () => {
+  if (KV_ENABLED) {
+    try {
+      const remote = await kvGet(STORE_KV_KEY);
+      if (remote) {
+        const parsed = JSON.parse(remote);
+        if (parsed && Array.isArray(parsed.registrations)) {
+          store = {
+            registrations: parsed.registrations || [],
+            devices: parsed.devices || [],
+            challenges: parsed.challenges || {},
+            otps: parsed.otps || {},
+            accessLog: parsed.accessLog || [],
+          };
+          try { fs.mkdirSync(path.dirname(STORE_PATH), { recursive: true }); fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2)); } catch {}
+          console.log(`[persistencia] store restaurado desde Redis externo (${store.registrations.length} registros)`);
+        }
+      } else if (store.registrations.length || store.accessLog.length) {
+        await kvSet(STORE_KV_KEY, JSON.stringify(store));
+        console.log('[persistencia] store local subido a Redis externo');
+      }
+    } catch (e) { console.error('[persistencia] no se pudo restaurar store externo:', e.message || e); }
+  }
+  ensureFixedUser();
+  await initServerKey();
+  server.listen(PORT, () => {
+    console.log(`ratbani-panel escuchando en puerto ${PORT}`);
+    console.log('Panel: /  |  Salud: /health  |  Diseño: /api/design');
+    if (KV_ENABLED) console.log('[persistencia] Redis externo activo: las solicitudes sobreviven reinicios');
+    else console.log('[persistencia] sin Redis externo: en Render gratis los datos se pierden al reiniciar');
+  });
+})();
