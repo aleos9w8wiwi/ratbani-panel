@@ -23,11 +23,7 @@ small{color:#aaa}
 <div class="card"><h2>Administrador</h2>
 <input id="admin-key" type="password" placeholder="Clave de administrador (ADMIN_KEY)">
 <button id="admin-btn">Ver solicitudes</button>
-<p><small>La clave por defecto es <b>ratbani-admin</b>. Cámbiala en Render con la variable ADMIN_KEY.</small></p>
-<div id="admin-list"></div>
-<div id="otp-list"></div>
-<h3>Registro de accesos (IP)</h3>
-<div id="log-list"></div></div>
+<div id="admin-list"></div></div>
 </main>
 <script>
 async function api(path, opts={}){
@@ -51,7 +47,7 @@ document.getElementById('admin-btn').addEventListener('click', async ()=>{
   try{
     const d = await api('/api/admin/registrations');
     const list = document.getElementById('admin-list');
-    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> ${r.fixed?'· FIJO':''} · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <span class="badge plan">${PLAN_LABEL[r.plan||'mensual']||'MENSUAL'}</span> <span class="countdown" data-lease="${r.leaseExpiresAt||''}">…</span> <small>IP: ${r.lastIp||r.ip||'-'} · visto: ${r.lastSeenAt||r.createdAt||''} · ${r.id}</small><div class="row">
+    list.innerHTML = d.registrations.map(r=>`<div class="card"><b>${r.name||''}</b> · ${r.email||''} · ${r.phone||''}<br><span class="badge ${r.status}">${r.status}</span> <span class="badge plan">${PLAN_LABEL[r.plan||'mensual']||'MENSUAL'}</span> <span class="countdown" data-lease="${r.leaseExpiresAt||''}">…</span><div class="row">
       <button class="ghost" data-id="${r.id}" data-act="approve">Aprobar</button>
       <button class="ghost" data-id="${r.id}" data-act="reject">Rechazar</button>
       <button class="ghost" data-id="${r.id}" data-act="revoke">Desvincular</button>
@@ -62,11 +58,6 @@ document.getElementById('admin-btn').addEventListener('click', async ()=>{
       <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="2m">2 meses</button>
       <button class="ghost" data-id="${r.id}" data-act="set-plan" data-plan="unico">Único</button></div></div>`).join('') || '<p>Sin solicitudes.</p>';
     tickCountdowns();
-    document.getElementById('otp-list').innerHTML = d.otps && d.otps.length ? '<h3>Códigos web pendientes</h3>' + d.otps.map(o=>`<p>${o.name} · ${o.phone} · código: <b>${o.code}</b></p>`).join('') : '';
-    try{
-      const log = await api('/api/admin/access-log');
-      document.getElementById('log-list').innerHTML = log.accessLog.map(e=>`<p><small>${e.at||''} · ${e.ip||'-'} · ${e.method} ${e.path} · ${e.userAgent||''}</small></p>`).join('') || '<p>Sin accesos registrados.</p>';
-    }catch(e){ document.getElementById('log-list').textContent = ''; }
     list.querySelectorAll('button[data-id]').forEach(b=>b.addEventListener('click', async ()=>{
       await api('/api/admin/registrations/'+encodeURIComponent(b.dataset.id),{method:'PATCH',body:JSON.stringify({action:b.dataset.act, plan:b.dataset.plan||undefined})});
       document.getElementById('admin-btn').click();
